@@ -1,11 +1,10 @@
 """
-B3 Pro Analyzer - Versão Gold
-=============================
-Funcionalidades:
-1. Conexão Robusta com Brapi.dev (Módulos Avançados).
-2. Engenharia Reversa (Cálculo de VPA/LPA faltantes).
-3. Detector de Solvência (Dívida/EBITDA e Margem Líquida).
-4. Exportação de Dados (Download CSV).
+B3 Pro Analyzer - Diamond Edition (Final)
+=========================================
+Correções e Funcionalidades:
+1. FIX Dívida/EBITDA: Calcula manualmente (Dívida Total / EBITDA) se o campo direto falhar.
+2. Comparação Setorial: Abas separadas para análise Apple-to-Apple.
+3. Robustez: Mantém a engenharia reversa de VPA e P/L.
 
 Token: rxNx6YXRYuEkQFDAc66r3C
 """
@@ -40,9 +39,6 @@ st.markdown("""
         box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
     }
     img { border-radius: 5px; }
-    /* Destaque para tabelas */
-    thead tr th:first-child {display:none}
-    tbody th {display:none}
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,11 +47,16 @@ class BrapiClient:
         self.token = "rxNx6YXRYuEkQFDAc66r3C"
         self.base_url = "https://brapi.dev/api"
         
+        # Lista expandida para ter diversidade de setores
         self.tickers_padrao = [
-            'BBAS3', 'ITUB4', 'BBDC4', 'SANB11', 'TAEE11', 'TRPL4', 'CPLE6', 'EGIE3',
-            'VALE3', 'CSNA3', 'GGBR4', 'WEGE3', 'PSSA3', 'BBSE3', 'CXSE3', 'SAPR11',
-            'CMIG4', 'KLBN11', 'SUZB3', 'PRIO3', 'PETR4', 'JBSS3', 'MRFG3', 'GOAU4',
-            'SBSP3', 'CSMG3', 'SAPR4', 'ORVR3' # Adicionados da sua lista recente
+            'BBAS3', 'ITUB4', 'BBDC4', 'SANB11', 'ABCB4', 'BRSR6', # Bancos
+            'TAEE11', 'TRPL4', 'CPLE6', 'EGIE3', 'ALUP11', 'CMIG4', # Elétricas
+            'VALE3', 'CSNA3', 'GGBR4', 'USIM5', 'GOAU4', # Siderurgia/Mineração
+            'WEGE3', 'PSSA3', 'BBSE3', 'CXSE3', # Bens Ind / Seguros
+            'SAPR11', 'CSMG3', 'SBSP3', # Saneamento
+            'PRIO3', 'PETR4', 'RECV3', # Petróleo
+            'JBSS3', 'MRFG3', 'BEEF3', # Frigoríficos
+            'MGLU3', 'LREN3', 'RDOR3' # Varejo/Saúde
         ]
 
     def _tratar_ticker(self, ticker):
@@ -85,14 +86,13 @@ class BrapiClient:
 
     def buscar_ativo_individual(self, ticker_raw):
         ticker = self._tratar_ticker(ticker_raw)
-        
         headers = {'Authorization': f'Bearer {self.token}'}
         
-        # SOLICITA MÓDULOS COMPLETOS
+        # Módulos essenciais
         params = {
             'fundamental': 'true', 
             'dividends': 'true',
-            'modules': 'defaultKeyStatistics,summaryDetail,financialData',
+            'modules': 'defaultKeyStatistics,summaryDetail,financialData,summaryProfile,price',
             'range': '1mo',
             'interval': '1d',
         }
@@ -107,13 +107,10 @@ class BrapiClient:
             
             stock = data['results'][0]
             
-            # --- Função "Farejadora" (Busca em todas as gavetas) ---
             def buscar_dado(keys_list):
-                # Tenta na raiz
                 for k in keys_list:
                     if stock.get(k): return stock.get(k)
-                # Tenta nos módulos
-                modulos = ['defaultKeyStatistics', 'summaryDetail', 'financialData']
+                modulos = ['defaultKeyStatistics', 'summaryDetail', 'financialData', 'summaryProfile', 'price']
                 for mod in modulos:
                     if mod in stock and isinstance(stock[mod], dict):
                         for k in keys_list:
@@ -127,33 +124,53 @@ class BrapiClient:
             
             logo = stock.get('logourl', 'https://brapi.dev/favicon.ico')
             
+            # SETOR
+            setor = stock.get('summaryProfile', {}).get('sector', 'Outros')
+            if not setor: setor = "Outros"
+            
+            # Tradução Setores
+            setor_map = {
+                'Financial Services': 'Financeiro', 'Utilities': 'Utilidades Púb.',
+                'Basic Materials': 'Materiais Básicos', 'Energy': 'Energia',
+                'Industrials': 'Industrial', 'Consumer Defensive': 'Consumo N. Cíclico',
+                'Consumer Cyclical': 'Consumo Cíclico', 'Technology': 'Tecnologia',
+                'Healthcare': 'Saúde', 'Real Estate': 'Imobiliário'
+            }
+            setor = setor_map.get(setor, setor)
+
             # Valuation
             pl = self._safe_float(buscar_dado(['priceToEarnings', 'trailingPE']))
             lpa = self._safe_float(buscar_dado(['earningsPerShare', 'trailingEps']))
             vpa = self._safe_float(buscar_dado(['bookValuePerShare', 'bookValue']))
             pvp = self._safe_float(buscar_dado(['priceToBook', 'priceToBookRatio']))
             
-            # Solvência & Qualidade (NOVOS!)
-            margem_liq = self._safe_float(buscar_dado(['profitMargins', 'profitMargin']))
+            # Solvência - CORREÇÃO MANUAL
             divida_ebitda = self._safe_float(buscar_dado(['debtToEbitda']))
             
-            # Engenharia Reversa (Correção Matemática)
+            # Se a API não der o Debt/EBITDA pronto, calculamos na unha
+            if divida_ebitda == 0:
+                total_debt = self._safe_float(buscar_dado(['totalDebt']))
+                ebitda = self._safe_float(buscar_dado(['ebitda']))
+                if ebitda > 0:
+                    divida_ebitda = total_debt / ebitda
+            
+            margem_liq = self._safe_float(buscar_dado(['profitMargins', 'profitMargin']))
+            
+            # Math Fix (Engenharia Reversa de Valuation)
             if vpa == 0 and pvp > 0: vpa = price / pvp
             if pvp == 0 and vpa > 0: pvp = price / vpa
             if lpa == 0 and pl > 0: lpa = price / pl
             if pl == 0 and lpa > 0: pl = price / lpa
                 
-            # Dividendos
             dy_raw = self._safe_float(buscar_dado(['dividendYield']))
             dy_decimal = dy_raw / 100 if dy_raw > 1 else dy_raw
             
             roe = self._safe_float(buscar_dado(['returnOnEquity']))
             volume = self._safe_float(stock.get('regularMarketVolume'))
             
-            # --- Cálculos ---
+            # Cálculos
             valor_graham = 0
             ms_graham = -100
-            
             if lpa > 0 and vpa > 0:
                 valor_graham = np.sqrt(22.5 * lpa * vpa)
                 ms_graham = ((valor_graham - price) / price) * 100
@@ -167,27 +184,22 @@ class BrapiClient:
                 closes = [d.get('close') for d in hist if d.get('close')]
                 rsi = self.calcular_rsi(closes)
             
-            # --- Detector de Armadilhas (Refinado) ---
+            # Armadilhas
             motivo_trap = []
             is_trap = False
-            
-            # 1. Rentabilidade
             if roe != 0 and roe < 0.05: motivo_trap.append("ROE Baixo (<5%)")
             
-            # 2. Solvência (Dívida)
+            # Tolerância maior para dívida (alguns setores operam alavancados)
             if divida_ebitda > 5: motivo_trap.append("Dívida Crítica (>5x)")
             
-            # 3. Eficiência (Margem)
             if margem_liq != 0 and margem_liq < 0.03: motivo_trap.append("Margem Baixa (<3%)")
-            
-            # 4. Liquidez
             if volume < 50000: motivo_trap.append("Sem Liquidez")
-            
             if motivo_trap: is_trap = True
 
             return {
                 'Logo': logo,
                 'Ticker': ticker,
+                'Setor': setor,
                 'Preço': price,
                 'V. Graham': valor_graham,
                 'MS Graham (%)': ms_graham,
@@ -215,17 +227,13 @@ class BrapiClient:
     def calcular_magic_score(self, df):
         if df.empty: return df
         df = df.copy()
-        
-        # Filtra apenas empresas lucrativas para o ranking
         mask = df['P/L'] > 0
         if not mask.any(): 
             df['Score Magic'] = 0
             return df
             
-        # Ranking: Menor P/L + Maior ROE
         df.loc[mask, 'Rank_PL'] = df.loc[mask, 'P/L'].rank(ascending=True)
         df.loc[mask, 'Rank_ROE'] = df.loc[mask, 'ROE (%)'].replace(0, -999).rank(ascending=False)
-        
         df['Magic_Points'] = df['Rank_PL'] + df['Rank_ROE']
         min_p, max_p = df['Magic_Points'].min(), df['Magic_Points'].max()
         
@@ -233,22 +241,22 @@ class BrapiClient:
             df['Score Magic'] = 100 * (1 - (df['Magic_Points'] - min_p) / (max_p - min_p))
         else:
             df['Score Magic'] = 50
-            
         return df.sort_values('Score Magic', ascending=False).fillna(0)
 
 def main():
-    st.markdown('<div class="main-header">💎 B3 Pro: Versão Gold</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">💎 B3 Pro: Diamond Edition</div>', unsafe_allow_html=True)
     
     client = BrapiClient()
     
-    # SIDEBAR
+    # --- SIDEBAR ---
     st.sidebar.header("⚙️ Controle")
-    entrada = st.sidebar.radio("Ativos:", ["Carteira Sugerida", "Minha Lista"])
+    entrada = st.sidebar.radio("Ativos:", ["Carteira Sugerida (Diversificada)", "Minha Lista"])
     
-    if entrada == "Carteira Sugerida":
+    if entrada == "Carteira Sugerida (Diversificada)":
         tickers = client.tickers_padrao
+        st.sidebar.info(f"Monitorando {len(tickers)} ativos de {len(set(client.tickers_padrao))} setores.")
     else:
-        text = st.sidebar.text_area("Digite os tickers:", "PETR4, VALE3, WEGE3, PRIO3")
+        text = st.sidebar.text_area("Digite os tickers:", "PETR4, VALE3, WEGE3, PRIO3, CMIG4")
         if text: tickers = text.split(',')
         else: tickers = []
 
@@ -256,12 +264,12 @@ def main():
     f_armadilha = st.sidebar.checkbox("Ocultar 'Armadilhas'", False)
     min_ms = st.sidebar.slider("Margem Graham Mínima %", -100, 100, -100)
     
-    if st.sidebar.button("🚀 Consultar API"):
+    if st.sidebar.button("🚀 Processar Análise"):
         if not tickers:
             st.warning("Defina tickers.")
             return
             
-        with st.spinner(f"Analisando {len(tickers)} ativos (Solvência + Valuation)..."):
+        with st.spinner(f"Analisando {len(tickers)} ativos (Calculando Dívida Real + Setores)..."):
             df = client.buscar_dados_paralelo(tickers)
         
         if df.empty:
@@ -270,18 +278,20 @@ def main():
 
         df = client.calcular_magic_score(df)
         
-        # Filtros
+        # Filtros Globais
         view = df.copy()
         if f_armadilha: view = view[view['Armadilha'].str.contains("NÃO")]
         view = view[view['MS Graham (%)'] >= min_ms]
 
-        st.subheader(f"🎯 Resultado da Análise ({len(view)})")
+        # --- SISTEMA DE ABAS ---
+        tab1, tab2 = st.tabs(["🏆 Ranking Geral", "🏢 Comparação Setorial"])
         
-        if view.empty:
-            st.warning("Sem resultados para os filtros atuais.")
-        else:
-            # Colunas para visualização
-            cols_view = ['Logo', 'Ticker', 'Preço', 'V. Graham', 'MS Graham (%)', 'P/L', 'ROE (%)', 'Dívida/EBITDA', 'Margem Liq (%)', 'Score Magic']
+        # --- ABA 1: GERAL ---
+        with tab1:
+            st.subheader(f"Visão Consolidada ({len(view)} ativos)")
+            
+            # Adicionei Setor na visualização
+            cols_view = ['Logo', 'Ticker', 'Setor', 'Preço', 'V. Graham', 'MS Graham (%)', 'P/L', 'Dívida/EBITDA', 'Score Magic']
             
             st.dataframe(
                 view[cols_view],
@@ -290,47 +300,76 @@ def main():
                     "Preço": st.column_config.NumberColumn(format="R$ %.2f"),
                     "V. Graham": st.column_config.NumberColumn(format="R$ %.2f"),
                     "MS Graham (%)": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Dívida/EBITDA": st.column_config.NumberColumn(format="%.2f"), # Agora vai aparecer!
                     "Score Magic": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
-                    "ROE (%)": st.column_config.NumberColumn(format="%.1f%%"),
-                    "Margem Liq (%)": st.column_config.NumberColumn(format="%.1f%%"),
-                    "Dívida/EBITDA": st.column_config.NumberColumn(format="%.2f"),
                 },
                 hide_index=True,
                 use_container_width=True
             )
             
-            # Botão de Download
+            # Botão Download Global
             csv = view.drop(columns=['Logo']).to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Baixar Relatório em Excel (CSV)",
-                data=csv,
-                file_name='b3_valuation_gold.csv',
-                mime='text/csv',
-            )
+            st.download_button("📥 Baixar Relatório Completo (CSV)", csv, 'b3_diamond.csv', 'text/csv')
+
+            st.info("Nota sobre Bancos (BBAS3, ITUB4, etc): É normal a Dívida/EBITDA ser 0.00, pois bancos não usam EBITDA na contabilidade padrão.")
+
+        # --- ABA 2: SETORIAL (Apple-to-Apple) ---
+        with tab2:
+            st.subheader("Análise Setorial 🍎")
             
-            st.divider()
-            
-            # Gráfico
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                fig = px.scatter(
-                    view, x='MS Graham (%)', y='ROE (%)', 
-                    size='Preço', color='Score Magic', 
-                    hover_name='Ticker', title="Matriz de Oportunidades",
-                    labels={'MS Graham (%)': 'Desconto Graham', 'ROE (%)': 'Qualidade (ROE)'},
-                    color_continuous_scale='RdYlGn'
-                )
-                fig.add_vline(x=0, line_dash="dot")
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                st.info("""
-                **Novos Indicadores:**
+            if not view.empty:
+                setores_disponiveis = sorted(view['Setor'].astype(str).unique())
+                setor_sel = st.selectbox("Selecione o Setor:", setores_disponiveis)
                 
-                📉 **Dívida/EBITDA:** Se for muito alta (>3x ou 5x), cuidado!
+                # Filtra apenas o setor
+                df_sector = view[view['Setor'] == setor_sel].sort_values('Score Magic', ascending=False)
                 
-                💰 **Margem Líquida:** Quanto % sobra de lucro da receita.
-                """)
+                if not df_sector.empty:
+                    # Métricas do Setor (Benchmark)
+                    media_pl = df_sector['P/L'].mean()
+                    media_roe = df_sector['ROE (%)'].mean()
+                    media_dy = df_sector['DY (%)'].mean()
+                    
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Média P/L do Setor", f"{media_pl:.1f}x")
+                    col2.metric("Média ROE do Setor", f"{media_roe:.1f}%")
+                    col3.metric("Média DY do Setor", f"{media_dy:.1f}%")
+                    
+                    st.markdown("---")
+                    
+                    # Gráfico Comparativo
+                    col_g1, col_g2 = st.columns([2, 1])
+                    
+                    with col_g1:
+                        st.markdown("#### 🥇 Ranking do Setor")
+                        fig_bar = px.bar(
+                            df_sector, 
+                            x='Score Magic', 
+                            y='Ticker', 
+                            orientation='h',
+                            color='Dívida/EBITDA', # Cor agora indica risco de dívida
+                            text='Score Magic',
+                            color_continuous_scale='RdYlGn_r', # Vermelho se dívida alta
+                            hover_data=['Preço', 'P/L', 'ROE (%)']
+                        )
+                        fig_bar.update_traces(texttemplate='%{text:.0f}', textposition='outside')
+                        fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
+                        st.plotly_chart(fig_bar, use_container_width=True)
+                    
+                    with col_g2:
+                        st.markdown("#### 🔬 Tabela Setorial")
+                        st.dataframe(
+                            df_sector[['Ticker', 'P/L', 'ROE (%)', 'Dívida/EBITDA']],
+                            column_config={
+                                 "P/L": st.column_config.NumberColumn(format="%.1f"),
+                                 "ROE (%)": st.column_config.NumberColumn(format="%.1f%%"),
+                                 "Dívida/EBITDA": st.column_config.NumberColumn(format="%.2f"),
+                            },
+                            hide_index=True,
+                            use_container_width=True
+                        )
+                else:
+                    st.warning("Nenhuma ação deste setor passou nos seus filtros de segurança.")
 
 if __name__ == "__main__":
     main()
