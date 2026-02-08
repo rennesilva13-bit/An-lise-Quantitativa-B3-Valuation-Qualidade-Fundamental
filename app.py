@@ -1,8 +1,8 @@
 """
-B3 Quant Analyzer - Análise Quantitativa de Ações da B3
-=======================================================
-Aplicação Streamlit para identificação de oportunidades com base em
-valuation atrativo e qualidade fundamental.
+B3 Quant Analyzer 2.0 - Value Investing & Valuation
+===================================================
+Aplicação Streamlit para análise fundamentalista e cálculo de valor intrínseco.
+Foco: Longo prazo, Dividendos e Segurança (Graham & Bazin).
 
 Autor: Analista Quantitativo
 Data: 2026
@@ -21,276 +21,320 @@ warnings.filterwarnings('ignore')
 
 # Configuração da página
 st.set_page_config(
-    page_title="B3 Quant Analyzer",
-    page_icon="📈",
+    page_title="B3 Value Investing",
+    page_icon="💎",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilo CSS personalizado
+# --- CSS Customizado ---
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-    }
-    .stButton>button {
-        width: 100%;
-        background-color: #1f77b4;
-        color: white;
-    }
+    .main-header { font-size: 2rem; font-weight: bold; color: #0066cc; text-align: center; margin-bottom: 1rem; }
+    .stMetric { background-color: #f8f9fa; padding: 10px; border-radius: 5px; border-left: 5px solid #0066cc; }
+    .success-text { color: green; font-weight: bold; }
+    .danger-text { color: red; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-class B3QuantAnalyzer:
+class B3Fundamentalist:
+    """
+    Motor de análise focado em Valuation e Segurança.
+    """
+    
     def __init__(self):
-        # Mapeamento aproximado de setores (baseado em prefixos comuns dos tickers)
-        self.setores_map = {
-            'AURE': 'Energia',
-            'CMIG': 'Energia',
-            'CPFE': 'Energia',
-            'CPLE': 'Energia',
-            'EGIE': 'Energia',
-            'ELET': 'Energia',
-            'ENGI': 'Energia',
-            'ENEV': 'Energia',
-            'ENMT': 'Energia',
-            'EQTL': 'Energia',
-            'TAEE': 'Energia',
-            'TRPL': 'Energia',
-            'AESB': 'Energia',
-            'ALUP': 'Energia',
-            'CEEB': 'Energia',
-            'CLSC': 'Energia',
-            'COCE': 'Energia',
-            'GEPA': 'Energia',
-            'LIGT': 'Energia',
-            'NEOE': 'Energia',
-            'RNEW': 'Energia',
-            'OUTROS': 'Outros'
-        }
-        
-        # Lista padrão fornecida pelo usuário
+        # Tickers padrão para facilitar o uso inicial
         self.tickers_padrao = [
-            "AURE3", "CMIG3", "CMIG4", "CPFE3", "CPLE3", "CPLE6", "EGIE3",
-            "ELET3", "ELET6", "ENGI11", "ENEV3", "ENMT3", "EQTL3", "TAEE11",
-            "TRPL4", "AESB3", "ALUP11", "CEEB3", "CLSC3", "COCE5", "GEPA4",
-            "LIGT3", "NEOE3", "RNEW11"
+            'BBAS3', 'ITUB4', 'BBDC4', 'SANB11', # Bancos
+            'TAEE11', 'TRPL4', 'CPLE6', 'EGIE3', # Elétricas
+            'VALE3', 'CSNA3', 'GGBR4',           # Commodities
+            'WEGE3', 'PSSA3', 'BBSE3', 'CXSE3'   # Outros
         ]
-        
-        # Pesos para cálculo do score
-        self.pesos = {'valuation': 0.5, 'qualidade': 0.5}
-    
-    def buscar_dados_fundamentalistas(self, ticker):
-        try:
-            stock = yf.Ticker(f"{ticker}.SA")  # Adiciona .SA automaticamente
-            info = stock.info
-            
-            pl = info.get('trailingPE', np.nan)
-            pvp = info.get('priceToBook', np.nan)
-            ev_ebitda = info.get('enterpriseToEbitda', np.nan)
-            dy = info.get('dividendYield', np.nan)
-            if not np.isnan(dy): dy *= 100
-            
-            roe = info.get('returnOnEquity', np.nan)
-            if not np.isnan(roe): roe *= 100
-            
-            margem_ebit = info.get('ebitdaMargins', np.nan)
-            if not np.isnan(margem_ebit): margem_ebit *= 100
-            
-            div_liq_ebitda = info.get('debtToEbitda', np.nan) or info.get('totalDebtToEBITDA', np.nan)
-            
-            preco_atual = info.get('currentPrice', np.nan)
-            receita_crescimento = info.get('revenueGrowth', np.nan)
-            if not np.isnan(receita_crescimento): receita_crescimento *= 100
-            
-            # Determina setor aproximado pelo ticker
-            prefixo = ticker[:4]
-            setor = self.setores_map.get(prefixo, 'OUTROS')
-            
-            return {
-                'ticker': ticker,
-                'nome': info.get('longName', ticker),
-                'setor': setor,
-                'preco': preco_atual,
-                'pl': pl,
-                'pvp': pvp,
-                'ev_ebitda': ev_ebitda,
-                'dy': dy,
-                'roe': roe,
-                'margem_ebit': margem_ebit,
-                'div_liq_ebitda': div_liq_ebitda,
-                'crescimento_receita': receita_crescimento
-            }
-        except Exception as e:
-            st.warning(f"Erro ao obter dados de {ticker}: {str(e)}")
-            return None
-    
-    def carregar_dados_batch(self, tickers):
+
+    def _tratar_ticker(self, ticker):
+        """Garante que o ticker tenha o sufixo .SA"""
+        ticker = ticker.strip().upper()
+        if not ticker.endswith('.SA'):
+            return f"{ticker}.SA"
+        return ticker
+
+    def calcular_valor_graham(self, lpa, vpa):
+        """
+        Fórmula de Benjamin Graham: Raiz(22.5 * LPA * VPA)
+        Retorna o Preço Justo.
+        """
+        if lpa > 0 and vpa > 0:
+            return np.sqrt(22.5 * lpa * vpa)
+        return 0
+
+    def calcular_valor_bazin(self, dividendos_12m):
+        """
+        Método de Décio Bazin: Preço Justo = Dividendos Anuais / 6%
+        """
+        if dividendos_12m > 0:
+            return dividendos_12m / 0.06
+        return 0
+
+    @st.cache_data(ttl=3600) # Cache de 1 hora para não ficar lento
+    def buscar_dados(_self, tickers):
+        """
+        Busca dados fundamentalistas e calcula indicadores avançados.
+        Usa cache do Streamlit para performance.
+        """
         dados_lista = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        for i, ticker in enumerate(tickers):
-            status_text.text(f"Processando {ticker} ({i+1}/{len(tickers)})")
-            dados = self.buscar_dados_fundamentalistas(ticker)
-            if dados:
-                dados_lista.append(dados)
-            progress_bar.progress((i + 1) / len(tickers))
+        total = len(tickers)
         
+        for i, ticker_raw in enumerate(tickers):
+            ticker = _self._tratar_ticker(ticker_raw)
+            status_text.text(f"Analisando fundamentos: {ticker}... ({i+1}/{total})")
+            
+            try:
+                stock = yf.Ticker(ticker)
+                # Fast_info costuma ser mais rápido e confiável para preços atuais
+                price = stock.fast_info.last_price
+                
+                # Tenta pegar info completa
+                info = stock.info
+                
+                # Dados Essenciais (com tratamento de erro/zeros)
+                lpa = info.get('trailingEps', 0) or 0
+                vpa = info.get('bookValue', 0) or 0
+                roe = info.get('returnOnEquity', 0) or 0
+                divida_ebitda = info.get('debtToEbitda', 0) or 0
+                margem_liq = info.get('profitMargins', 0) or 0
+                dy_rate = info.get('dividendRate', 0) or 0  # Em valor monetário
+                dy_percent = info.get('dividendYield', 0) or 0
+                volume = info.get('averageVolume', 0) or 0
+                
+                # Cálculos de Valuation
+                valor_graham = _self.calcular_valor_graham(lpa, vpa)
+                valor_bazin = _self.calcular_valor_bazin(dy_rate)
+                
+                # Margem de Segurança (Graham)
+                ms_graham = ((valor_graham - price) / price) * 100 if valor_graham > 0 else -100
+                
+                # Classificação de "Armadilha"
+                # Critérios: Prejuízo, Dívida alta ou Sem liquidez
+                is_trap = False
+                motivo_trap = []
+                
+                if roe < 0.05: # ROE menor que 5% (ou negativo)
+                    is_trap = True
+                    motivo_trap.append("Baixa Rentabilidade")
+                if divida_ebitda > 4: # Alavancagem alta
+                    is_trap = True
+                    motivo_trap.append("Dívida Alta")
+                if margem_liq < 0.03: # Margem líquida < 3%
+                    is_trap = True
+                    motivo_trap.append("Margem Baixa")
+                if volume < 500000: # Liquidez < 500k/dia
+                    is_trap = True
+                    motivo_trap.append("Baixa Liquidez")
+
+                dados_lista.append({
+                    'Ticker': ticker.replace('.SA', ''),
+                    'Preço Atual': price,
+                    'Valor Graham': valor_graham,
+                    'Valor Bazin': valor_bazin,
+                    'MS Graham (%)': ms_graham,
+                    'DY (%)': dy_percent * 100,
+                    'P/L': info.get('trailingPE', 0),
+                    'P/VP': info.get('priceToBook', 0),
+                    'ROE (%)': roe * 100,
+                    'Margem Liq. (%)': margem_liq * 100,
+                    'Dívida/EBITDA': divida_ebitda,
+                    'Armadilha': "⚠️ SIM" if is_trap else "🛡️ NÃO",
+                    'Alertas': ", ".join(motivo_trap) if motivo_trap else "OK",
+                    'Score Magic': 0 # Será calculado depois
+                })
+                
+            except Exception as e:
+                # Opcional: print(f"Erro em {ticker}: {e}")
+                pass
+                
+            progress_bar.progress((i + 1) / total)
+            
+        progress_bar.empty()
         status_text.empty()
+        
         return pd.DataFrame(dados_lista)
-    
-    def calcular_scores(self, df):
-        if df.empty:
-            return df
+
+    def calcular_magic_score(self, df):
+        """
+        Implementa uma versão simplificada da Magic Formula (Greenblatt):
+        Ranking combinado de Earning Yield (barato) + ROE (qualidade).
+        """
+        if df.empty: return df
         
-        # Normalização (maior = melhor)
-        df['pl_score'] = 1 / (df['pl'].replace([np.nan, np.inf], 100) + 1)
-        df['pvp_score'] = 1 / (df['pvp'].replace([np.nan, np.inf], 100) + 1)
-        df['ev_ebitda_score'] = 1 / (df['ev_ebitda'].replace([np.nan, np.inf], 100) + 1)
-        df['dy_score'] = df['dy'].fillna(0) / 20  # normaliza DY
-        df['roe_score'] = df['roe'].fillna(0) / 50
-        df['margem_score'] = df['margem_ebit'].fillna(0) / 50
-        df['div_liq_score'] = 1 / (df['div_liq_ebitda'].abs().replace([np.nan, np.inf], 10) + 1)
-        df['cresc_score'] = df['crescimento_receita'].fillna(0) / 50
+        df = df.copy()
         
-        df['score_valuation'] = df[['pl_score', 'pvp_score', 'ev_ebitda_score', 'dy_score']].mean(axis=1)
-        df['score_qualidade'] = df[['roe_score', 'margem_score', 'div_liq_score', 'cresc_score']].mean(axis=1)
+        # Remover empresas com LPA negativo para o ranking
+        df_valid = df[df['P/L'] > 0]
         
-        df['score_final'] = (
-            df['score_valuation'] * self.pesos['valuation'] +
-            df['score_qualidade'] * self.pesos['qualidade']
-        )
+        # Ranking de Preço (Earning Yield: Maior P/L invertido é melhor, ou seja, Menor P/L)
+        df['Rank_PL'] = df['P/L'].rank(ascending=True)
         
-        def classificar(score):
-            if pd.isna(score): return "Indisponível"
-            if score >= 0.70: return "Excelente"
-            if score >= 0.50: return "Boa"
-            if score >= 0.30: return "Média"
-            return "Baixa"
+        # Ranking de Qualidade (Maior ROE é melhor)
+        df['Rank_ROE'] = df['ROE (%)'].rank(ascending=False)
         
-        df['classificacao'] = df['score_final'].apply(classificar)
-        return df.sort_values('score_final', ascending=False)
+        # Score Final (Menor soma é melhor)
+        df['Magic_Points'] = df['Rank_PL'] + df['Rank_ROE']
+        
+        # Normalizar para visualização (0 a 100, onde 100 é o melhor)
+        max_pts = df['Magic_Points'].max()
+        min_pts = df['Magic_Points'].min()
+        
+        if max_pts != min_pts:
+            df['Score Magic'] = 100 * (1 - (df['Magic_Points'] - min_pts) / (max_pts - min_pts))
+        else:
+            df['Score Magic'] = 50
+            
+        return df.sort_values('Score Magic', ascending=False)
 
 def main():
-    st.markdown('<h1 class="main-header">B3 Quant Analyzer – Setor Elétrico</h1>', unsafe_allow_html=True)
-    st.markdown("Análise quantitativa focada em empresas do setor elétrico da B3")
+    st.markdown('<div class="main-header">💎 B3 Quant Analyzer: Value Investing</div>', unsafe_allow_html=True)
+    
+    analyzer = B3Fundamentalist()
+    
+    # --- Sidebar ---
+    st.sidebar.header("🔍 Configuração da Análise")
+    
+    # Input de Tickers
+    modo_input = st.sidebar.radio("Seleção de Ativos:", ["Lista Padrão (Sugestão)", "Minha Carteira / Lista Personalizada"])
+    
+    if modo_input == "Lista Padrão (Sugestão)":
+        tickers_selecionados = analyzer.tickers_padrao
+        st.sidebar.info(f"{len(tickers_selecionados)} ativos selecionados.")
+    else:
+        lista_texto = st.sidebar.text_area("Cole os tickers (separados por vírgula ou espaço):", "WEGE3, ITSA4, FLRY3, LEVE3")
+        if lista_texto:
+            import re
+            tickers_selecionados = re.split(r'[,\s;]+', lista_texto)
+            tickers_selecionados = [t for t in tickers_selecionados if t] # Remove vazios
+        else:
+            tickers_selecionados = []
 
-    analyzer = B3QuantAnalyzer()
+    # Filtros Globais
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🛡️ Filtros de Segurança")
+    filtrar_armadilhas = st.sidebar.checkbox("Esconder 'Armadilhas' (Dívida Alta/Prejuízo)", value=True)
+    ms_minima = st.sidebar.slider("Margem de Segurança Mínima (Graham) %", -50, 100, 0)
+    
+    if st.sidebar.button("🚀 Processar Valuation"):
+        if not tickers_selecionados:
+            st.warning("Por favor, insira pelo menos um ticker.")
+            return
 
-    # Barra lateral – Configuração dos tickers
-    with st.sidebar:
-        st.header("Configuração da Análise")
+        # Busca e Processamento
+        df = analyzer.buscar_dados(tickers_selecionados)
         
-        tickers_input = st.text_area(
-            "Insira os tickers (um por linha, sem .SA)",
-            value="\n".join(analyzer.tickers_padrao),
-            height=300,
-            help="Exemplo:\nAURE3\nCMIG3\nTAEE11\n..."
+        if df.empty:
+            st.error("Não foi possível coletar dados. Verifique os tickers.")
+            return
+
+        # Aplica Magic Score
+        df = analyzer.calcular_magic_score(df)
+        
+        # Aplica Filtros Visuais
+        if filtrar_armadilhas:
+            df_display = df[df['Armadilha'].str.contains("NÃO")]
+        else:
+            df_display = df
+            
+        df_display = df_display[df_display['MS Graham (%)'] >= ms_minima]
+
+        # --- Dashboard ---
+        
+        # 1. Top Picks
+        st.subheader("🏆 Top Oportunidades (Ranking Magic Score)")
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            st.markdown("Combinação de **Qualidade (ROE)** e **Preço Baixo (P/L)**.")
+            cols_view = ['Ticker', 'Preço Atual', 'Valor Graham', 'Valor Bazin', 'MS Graham (%)', 'DY (%)', 'ROE (%)', 'Score Magic', 'Alertas']
+            
+            st.dataframe(
+                df_display[cols_view].style.format({
+                    'Preço Atual': 'R$ {:.2f}',
+                    'Valor Graham': 'R$ {:.2f}',
+                    'Valor Bazin': 'R$ {:.2f}',
+                    'MS Graham (%)': '{:.1f}%',
+                    'DY (%)': '{:.1f}%',
+                    'ROE (%)': '{:.1f}%',
+                    'Score Magic': '{:.0f}'
+                }).background_gradient(cmap='Greens', subset=['MS Graham (%)', 'Score Magic']),
+                use_container_width=True,
+                height=400
+            )
+            
+        with col2:
+            st.info("""
+            **Legenda:**
+            
+            🧠 **Valor Graham:** Preço justo baseado em Lucro e Patrimônio.
+            
+            💰 **Valor Bazin:** Preço teto para receber 6% de dividendos.
+            
+            🛡️ **MS (Margem de Segurança):** O desconto atual em relação ao preço de Graham.
+            
+            ✨ **Score Magic:** Nota de 0 a 100 combinando rentabilidade e preço.
+            """)
+
+        # 2. Gráfico de Quadrantes (Risco x Retorno)
+        st.markdown("---")
+        st.subheader("📊 Matriz de Valor: Qualidade vs. Desconto")
+        
+        fig = px.scatter(
+            df_display,
+            x='MS Graham (%)',
+            y='ROE (%)',
+            size='DY (%)',
+            color='Score Magic',
+            hover_name='Ticker',
+            hover_data=['Preço Atual', 'Valor Graham', 'Alertas'],
+            title='Onde estão as Joias? (Canto Superior Direito = Melhor)',
+            labels={'MS Graham (%)': 'Desconto (Margem de Segurança)', 'ROE (%)': 'Qualidade (ROE)'},
+            height=600,
+            color_continuous_scale='RdYlGn'
         )
         
-        tickers = [t.strip().upper() for t in tickers_input.split("\n") if t.strip()]
+        # Linhas de referência
+        fig.add_hline(y=15, line_dash="dot", annotation_text="ROE Excelente (>15%)")
+        fig.add_vline(x=0, line_dash="dot", annotation_text="Preço Justo Graham")
+        fig.add_vline(x=30, line_dash="dash", line_color="green", annotation_text="Zona de Oportunidade (>30%)")
         
-        st.subheader("Filtros Adicionais")
-        min_roe = st.slider("ROE mínimo (%)", 0.0, 50.0, 8.0)
-        max_div_ebitda = st.slider("Dívida Líquida/EBITDA máxima", 0.0, 6.0, 4.0)
-        max_pl = st.slider("P/L máximo", 5.0, 40.0, 20.0)
-        min_dy = st.slider("Dividend Yield mínimo (%)", 0.0, 15.0, 5.0)
-        
-        if st.button("Executar Análise", type="primary"):
-            if not tickers:
-                st.error("Nenhum ticker informado.")
-                return
-            
-            with st.spinner("Obtendo dados da B3..."):
-                df_raw = analyzer.carregar_dados_batch(tickers)
-            
-            if df_raw.empty:
-                st.error("Nenhum dado válido retornado. Verifique os tickers ou conexão.")
-                return
-            
-            df = analyzer.calcular_scores(df_raw)
-            
-            # Aplicar filtros
-            df_filtrado = df[
-                (df['roe'] >= min_roe) &
-                (df['div_liq_ebitda'] <= max_div_ebitda) &
-                (df['pl'] <= max_pl) &
-                (df['dy'] >= min_dy)
-            ].copy()
-            
-            st.session_state['df_completo'] = df
-            st.session_state['df_filtrado'] = df_filtrado
-            st.success(f"Análise finalizada. {len(df_filtrado)} ações atendem aos critérios.")
+        st.plotly_chart(fig, use_container_width=True)
 
-    # Área principal
-    if 'df_filtrado' in st.session_state and not st.session_state['df_filtrado'].empty:
-        df_filtrado = st.session_state['df_filtrado']
-        df_completo = st.session_state['df_completo']
+        # 3. Análise Individual Detalhada
+        st.markdown("---")
+        st.subheader("🔍 Raio-X do Ativo")
+        ticker_select = st.selectbox("Escolha um ativo para ver detalhes:", df['Ticker'].unique())
         
-        tab1, tab2, tab3 = st.tabs(["Dashboard", "Detalhes", "Dados Completos"])
+        row = df[df['Ticker'] == ticker_select].iloc[0]
         
-        with tab1:
-            st.subheader("Top Oportunidades (Setor Elétrico)")
-            st.dataframe(
-                df_filtrado[['ticker', 'nome', 'setor', 'preco', 'pl', 'dy', 'roe', 'score_final', 'classificacao']]
-                .head(15)
-                .round(2)
-            )
+        col_a, col_b, col_c = st.columns(3)
+        
+        with col_a:
+            st.metric("Preço Atual", f"R$ {row['Preço Atual']:.2f}")
+            dif_graham = row['MS Graham (%)']
+            st.metric("Potencial (Graham)", f"{dif_graham:.1f}%", delta_color="normal" if dif_graham > 0 else "inverse")
             
-            fig = px.scatter(
-                df_filtrado,
-                x='pl',
-                y='roe',
-                size='dy',
-                color='score_final',
-                hover_name='ticker',
-                title="P/L vs ROE (tamanho = DY)",
-                labels={'pl': 'P/L', 'roe': 'ROE (%)', 'dy': 'DY (%)'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with tab2:
-            ticker_sel = st.selectbox("Selecione uma ação", df_filtrado['ticker'].tolist())
-            if ticker_sel:
-                row = df_filtrado[df_filtrado['ticker'] == ticker_sel].iloc[0]
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.write(f"**{row['nome']}** ({row['ticker']})")
-                    st.write(f"Setor: {row['setor']}")
-                    st.write(f"Preço: R$ {row['preco']:.2f}")
-                    st.write(f"Score Final: **{row['score_final']:.2f}** – {row['classificacao']}")
-                    st.write("**Valuation**")
-                    st.write(f"P/L: {row['pl']:.1f}")
-                    st.write(f"P/VP: {row['pvp']:.1f}")
-                    st.write(f"DY: {row['dy']:.1f}%")
-                
-                with col2:
-                    st.write("**Qualidade**")
-                    st.write(f"ROE: {row['roe']:.1f}%")
-                    st.write(f"Margem EBIT: {row['margem_ebit']:.1f}%")
-                    st.write(f"Dív. Líq./EBITDA: {row['div_liq_ebitda']:.1f}")
-        
-        with tab3:
-            st.subheader("Dados Completos")
-            st.dataframe(df_filtrado.round(2))
+        with col_b:
+            st.metric("Preço Teto Bazin (6%)", f"R$ {row['Valor Bazin']:.2f}")
+            st.metric("Dividend Yield", f"{row['DY (%)']:.1f}%")
             
-            csv = df_filtrado.to_csv(index=False).encode('utf-8')
-            st.download_button("Baixar CSV", csv, "analise_setor_eletrico.csv", "text/csv")
-    
-    else:
-        st.info("Insira os tickers na barra lateral e clique em 'Executar Análise' para iniciar.")
+        with col_c:
+            st.metric("ROE (Rentabilidade)", f"{row['ROE (%)']:.1f}%")
+            divida_status = "✅ Controlada" if row['Dívida/EBITDA'] < 3 else "⚠️ Alta"
+            st.metric("Dívida/EBITDA", f"{row['Dívida/EBITDA']:.2f}", divida_status)
+            
+        if row['Alertas'] != "OK":
+            st.error(f"🚨 Pontos de Atenção: {row['Alertas']}")
+        else:
+            st.success("✅ Aparentemente sem 'armadilhas' fundamentais óbvias.")
 
 if __name__ == "__main__":
     main()
