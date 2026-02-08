@@ -1,11 +1,10 @@
 """
-B3 Pro Analyzer - Titanium Edition (DCF Master)
-===============================================
-Novidade Principal: Valuation por Fluxo de Caixa Descontado (DCF).
-- Projeção de 2 Estágios (Crescimento + Perpetuidade).
-- Matriz de Sensibilidade (WACC vs Growth).
-- Cálculo automático do Valor Intrínseco para todas as ações.
-- Mantém filtros Anti-Trap e Comparação Setorial.
+B3 Pro Analyzer - Titanium Edition (DCF Fix)
+============================================
+Correções:
+1. Resiliência: Se faltar FCF (Fluxo de Caixa), estima via EBITDA para não travar.
+2. Fallback: Se o DCF falhar, a ação ainda aparece na lista com os outros dados.
+3. Robustez: Tratamento de erros campo a campo para evitar descarte total do ativo.
 
 Token: rxNx6YXRYuEkQFDAc66r3C
 """
@@ -54,9 +53,6 @@ st.markdown("""
     }
     
     img { border-radius: 5px; }
-    
-    /* Tabela de Sensibilidade */
-    .dataframe { font-size: 12px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -105,36 +101,40 @@ class BrapiClient:
         ticker = self._tratar_ticker(ticker_raw)
         headers = {'Authorization': f'Bearer {self.token}'}
         
+        # Solicita módulos financeiros para tentar achar o FCF
         params = {
             'fundamental': 'true', 
             'dividends': 'true',
-            'modules': 'defaultKeyStatistics,summaryDetail,financialData,summaryProfile,price', # Modulos essenciais
+            'modules': 'defaultKeyStatistics,summaryDetail,financialData,summaryProfile,price', 
             'range': '1y',
             'interval': '1d',
         }
         
         try:
             url = f"{self.base_url}/quote/{ticker}"
-            response = requests.get(url, headers=headers, params=params, timeout=12)
+            # Timeout aumentado para 15s para garantir download de balanços
+            response = requests.get(url, headers=headers, params=params, timeout=15)
             data = response.json()
             
             if 'results' not in data or not data['results']: return None
             stock = data['results'][0]
             
             def buscar_dado(keys_list):
+                # 1. Busca na raiz
                 for k in keys_list:
                     if stock.get(k): return stock.get(k)
+                # 2. Busca nos módulos
                 modulos = ['defaultKeyStatistics', 'summaryDetail', 'financialData', 'summaryProfile', 'price']
                 for mod in modulos:
                     if mod in stock and isinstance(stock[mod], dict):
                         for k in keys_list:
                             val = stock[mod].get(k)
-                            if val: return val
+                            if val is not None: return val # Aceita 0, mas não None
                 return 0
 
-            # 1. Dados Básicos
+            # --- Extração de Dados Essenciais ---
             price = self._safe_float(stock.get('regularMarketPrice'))
-            if price == 0: return None
+            if price == 0: return None # Sem preço não tem jogo
             
             logo = stock.get('logourl', 'https://brapi.dev/favicon.ico')
             setor = stock.get('summaryProfile', {}).get('sector', 'Outros')
@@ -147,26 +147,26 @@ class BrapiClient:
             }
             setor = setor_map.get(setor, setor)
 
-            # 2. Dados para DCF (Ouro!)
+            # --- DADOS DCF (Modo Resiliente) ---
             fcf = self._safe_float(buscar_dado(['freeCashflow', 'freeCashFlow']))
+            ebitda = self._safe_float(buscar_dado(['ebitda', 'EBITDA']))
+            
+            # Fallback: Se não tem FCF, estima via EBITDA
+            # FCF ≈ EBITDA * 0.7 (Assumindo 30% de Impostos + Capex em média)
+            if fcf == 0 and ebitda != 0:
+                fcf = ebitda * 0.7 
+            
+            # Se ainda for 0, tenta Operating Cash Flow
             if fcf == 0:
-                # Tentativa de cálculo manual: OCF - CapEx
                 ocf = self._safe_float(buscar_dado(['operatingCashflow', 'totalCashFromOperatingActivities']))
-                # CapEx costuma não vir explícito em alguns JSONs simplificados, mas tentamos
-                # Se não tiver, usamos uma proxy conservadora: EBITDA * 0.5 (Grosseiro mas funcional para fallback)
-                ebitda = self._safe_float(buscar_dado(['ebitda']))
-                if ocf != 0:
-                    fcf = ocf * 0.7 # Assumindo 30% de Capex médio se não tiver dado
-                elif ebitda != 0:
-                    fcf = ebitda * 0.5 # Proxy conservadora
+                if ocf != 0: fcf = ocf * 0.8 # OCF - Capex estimado
             
             shares = self._safe_float(buscar_dado(['sharesOutstanding', 'impliedSharesOutstanding']))
             total_debt = self._safe_float(buscar_dado(['totalDebt']))
-            total_cash = self._safe_float(buscar_dado(['totalCash', 'totalCashFromOperatingActivities'])) # Cuidado com cash vs OCF
-            # Melhor pegar totalCash especifico do balanço
-            if total_cash == 0: total_cash = self._safe_float(buscar_dado(['cash']))
+            total_cash = self._safe_float(buscar_dado(['totalCash', 'cash', 'totalCashFromOperatingActivities']))
+            net_debt = total_debt - total_cash
 
-            # 3. Valuation & Qualidade
+            # --- Valuation Clássico ---
             pl = self._safe_float(buscar_dado(['priceToEarnings', 'trailingPE']))
             lpa = self._safe_float(buscar_dado(['earningsPerShare', 'trailingEps']))
             vpa = self._safe_float(buscar_dado(['bookValuePerShare', 'bookValue']))
@@ -218,7 +218,7 @@ class BrapiClient:
                 'DY (%)': dy_decimal * 100, 'P/L': pl, 'P/VP': pvp,
                 'ROE (%)': roe * 100, 'Margem Liq (%)': margem_liq * 100,
                 'Dívida/EBITDA': divida_ebitda, 'IFR (14)': rsi,
-                'FCF': fcf, 'Shares': shares, 'Net Debt': total_debt - total_cash,
+                'FCF': fcf, 'Shares': shares, 'Net Debt': net_debt,
                 'Armadilha': "⚠️ SIM" if is_trap else "🛡️ NÃO",
                 'Score Magic': 0
             }
@@ -248,58 +248,49 @@ class BrapiClient:
 
 # --- ENGINE DCF ---
 def calcular_dcf_individual(row, growth_rate=0.06, wacc=0.12, terminal_growth=0.03, projection_years=5):
-    """
-    Calcula o Valor Intrínseco via Discounted Cash Flow.
-    """
     try:
         fcf = row['FCF']
         shares = row['Shares']
         net_debt = row['Net Debt']
         
-        if fcf <= 0 or shares <= 0: return 0, -100 # FCF Negativo não permite DCF simples
+        # Se não temos dados vitais, não calcula (retorna 0), mas não quebra o app
+        if fcf <= 0 or shares <= 0: return 0, -100
         
-        # 1. Projeção dos Fluxos de Caixa
+        # 1. Projeção
         future_fcf = []
         for i in range(1, projection_years + 1):
             fcf_proj = fcf * ((1 + growth_rate) ** i)
             future_fcf.append(fcf_proj)
             
-        # 2. Valor Terminal (Perpetuidade)
-        # Fórmula: (FCF_final * (1 + g_term)) / (WACC - g_term)
+        # 2. Terminal
         terminal_value = (future_fcf[-1] * (1 + terminal_growth)) / (wacc - terminal_growth)
         
-        # 3. Trazer a Valor Presente (PV)
+        # 3. Valor Presente (PV)
         pv_flows = 0
         for i, val in enumerate(future_fcf):
             pv_flows += val / ((1 + wacc) ** (i + 1))
             
         pv_terminal = terminal_value / ((1 + wacc) ** projection_years)
         
-        # 4. Enterprise Value -> Equity Value
+        # 4. Valor Final
         enterprise_value = pv_flows + pv_terminal
         equity_value = enterprise_value - net_debt
-        
-        # 5. Valor por Ação
         fair_price = equity_value / shares
         
-        # Margem de Segurança
-        current_price = row['Preço']
-        margin = ((fair_price - current_price) / current_price) * 100
+        margin = ((fair_price - row['Preço']) / row['Preço']) * 100
         
         return fair_price, margin
     except:
         return 0, -100
 
 def main():
-    st.markdown('<div class="main-header">💎 B3 Pro: Titanium (DCF)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">💎 B3 Pro: Titanium (Fix)</div>', unsafe_allow_html=True)
     
     client = BrapiClient()
     
-    # Session State
     if 'dados_b3' not in st.session_state:
         st.session_state['dados_b3'] = pd.DataFrame()
 
-    # SIDEBAR
     st.sidebar.header("⚙️ Controle")
     entrada = st.sidebar.radio("Ativos:", ["Carteira Sugerida", "Minha Lista"])
     
@@ -310,20 +301,19 @@ def main():
         if text: tickers = text.split(',')
         else: tickers = []
 
-    # Configurações Globais DCF (Para o Ranking)
-    st.sidebar.subheader("📊 Premissas DCF (Ranking)")
+    st.sidebar.subheader("📊 Premissas DCF")
     global_wacc = st.sidebar.slider("WACC Global (%)", 8.0, 20.0, 12.0, 0.5) / 100
     global_growth = st.sidebar.slider("Crescimento Global (%)", 0.0, 20.0, 6.0, 0.5) / 100
     
     if st.sidebar.button("🚀 Carregar Dados + Calcular DCF"):
         if not tickers: st.warning("Defina tickers.")
         else:
-            with st.spinner("Analisando Fluxo de Caixa e Balanços..."):
+            with st.spinner("Analisando Balanços e Fluxos de Caixa..."):
                 df_new = client.buscar_dados_paralelo(tickers)
                 if not df_new.empty:
                     df_new = client.calcular_magic_score(df_new)
                     
-                    # Calcula DCF Padrão para todos
+                    # Calcula DCF
                     dcf_results = df_new.apply(
                         lambda x: calcular_dcf_individual(x, growth_rate=global_growth, wacc=global_wacc), 
                         axis=1, result_type='expand'
@@ -333,11 +323,10 @@ def main():
                     
                     st.session_state['dados_b3'] = df_new
                     st.success("Análise Completa!")
-                else: st.error("Falha ao buscar dados.")
+                else: 
+                    st.error("Não foi possível coletar dados suficientes. A API pode estar instável ou os tickers inválidos.")
 
     st.sidebar.divider()
-    
-    # FILTROS
     f_armadilha = st.sidebar.checkbox("Ocultar 'Armadilhas'", False)
     
     if not st.session_state['dados_b3'].empty:
@@ -345,17 +334,12 @@ def main():
         view = df.copy()
         if f_armadilha: view = view[view['Armadilha'].str.contains("NÃO")]
         
-        # TABS
-        tab1, tab2, tab3 = st.tabs(["🏆 Ranking Valuation", "🏢 Comparação Setorial", "💎 Valuation DCF Detalhado"])
+        tab1, tab2, tab3 = st.tabs(["🏆 Ranking Valuation", "🏢 Comparação Setorial", "💎 Calculadora DCF"])
         
-        # --- TAB 1: Ranking ---
         with tab1:
-            st.subheader("Melhores Oportunidades (Graham + DCF)")
-            st.info(f"O cálculo DCF abaixo usa as premissas globais: Crescimento {global_growth*100}% e WACC {global_wacc*100}%. Para refinar, vá na aba 'Valuation DCF'.")
-            
-            cols_view = ['Logo', 'Ticker', 'Preço', 'V. Graham', 'V. DCF (Padrão)', 'MS DCF (%)', 'P/L', 'ROE (%)', 'Score Magic']
+            st.subheader("Oportunidades")
             st.dataframe(
-                view[cols_view],
+                view[['Logo', 'Ticker', 'Preço', 'V. Graham', 'V. DCF (Padrão)', 'MS DCF (%)', 'P/L', 'ROE (%)', 'Score Magic']],
                 column_config={
                     "Logo": st.column_config.ImageColumn("Logo", width="small"),
                     "Preço": st.column_config.NumberColumn(format="R$ %.2f"),
@@ -366,98 +350,59 @@ def main():
                 },
                 hide_index=True, use_container_width=True
             )
+            st.info("Nota: Se V. DCF for 0, significa que a empresa tem FCF negativo ou dados insuficientes para projeção.")
         
-        # --- TAB 2: Setorial ---
         with tab2:
-            st.subheader("Comparação por Setor")
+            st.subheader("Setorial")
             setores = sorted(view['Setor'].astype(str).unique())
-            setor_sel = st.selectbox("Escolha o Setor:", setores)
+            setor_sel = st.selectbox("Setor:", setores)
             df_sec = view[view['Setor'] == setor_sel].sort_values('Score Magic', ascending=False)
             
             if not df_sec.empty:
-                media_pl = df_sec['P/L'].mean()
-                c1, c2 = st.columns(2)
-                c1.metric("Média P/L Setor", f"{media_pl:.1f}x")
-                c2.metric("Líder do Setor", df_sec.iloc[0]['Ticker'])
-                
                 st.dataframe(
                     df_sec[['Ticker', 'Preço', 'MS DCF (%)', 'P/L', 'ROE (%)', 'Dívida/EBITDA']],
                     column_config={"MS DCF (%)": st.column_config.NumberColumn(format="%.1f%%")},
                     hide_index=True, use_container_width=True
                 )
         
-        # --- TAB 3: DCF DETALHADO (A JOIA DA COROA) ---
         with tab3:
-            st.subheader("🔬 Calculadora DCF Profissional")
-            
-            # Seletor de Ativo
-            ticker_dcf = st.selectbox("Selecione o Ativo para Valuation:", view['Ticker'].unique())
+            st.subheader("🔬 Calculadora DCF")
+            ticker_dcf = st.selectbox("Ativo:", view['Ticker'].unique())
             row = view[view['Ticker'] == ticker_dcf].iloc[0]
             
-            col_input, col_result = st.columns([1, 2])
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                st.markdown("#### Premissas")
+                dg = st.slider("Crescimento %", 0.0, 25.0, global_growth*100, 0.5) / 100
+                dw = st.slider("WACC %", 8.0, 25.0, global_wacc*100, 0.5) / 100
+                dt = st.slider("Perpetuidade %", 0.0, 6.0, 3.0, 0.1) / 100
+                
+                st.markdown("#### Dados Base")
+                st.metric("FCF (Milhões)", f"R$ {row['FCF']/1e6:.0f}M")
+                st.metric("Dívida Líq. (Milhões)", f"R$ {row['Net Debt']/1e6:.0f}M")
             
-            with col_input:
-                st.markdown("#### Premissas do Modelo")
-                dcf_growth = st.slider("Crescimento (5 anos) %", 0.0, 25.0, global_growth*100, 0.5) / 100
-                dcf_wacc = st.slider("WACC (Taxa de Desconto) %", 8.0, 25.0, global_wacc*100, 0.5) / 100
-                dcf_terminal = st.slider("Crescimento Perpétuo %", 0.0, 6.0, 3.0, 0.1) / 100
+            with c2:
+                fp, marg = calcular_dcf_individual(row, dg, dw, dt)
+                st.markdown("### Resultado")
+                col_m1, col_m2, col_m3 = st.columns(3)
+                col_m1.metric("Preço Justo", f"R$ {fp:.2f}")
+                col_m2.metric("Preço Tela", f"R$ {row['Preço']:.2f}")
+                col_m3.metric("Margem", f"{marg:.1f}%", delta_color="normal" if marg > 0 else "off")
                 
-                # Dados da Empresa
-                st.markdown("#### Dados Financeiros")
-                st.text_input("Ticker", row['Ticker'], disabled=True)
-                st.number_input("Fluxo Caixa Livre (FCF) Milhões", value=float(row['FCF']/1e6), disabled=True)
-                st.number_input("Dívida Líquida Milhões", value=float(row['Net Debt']/1e6), disabled=True)
-            
-            with col_result:
-                # Recalcula com inputs do usuário
-                fair_price, margin = calcular_dcf_individual(row, dcf_growth, dcf_wacc, dcf_terminal)
+                if row['FCF'] <= 0:
+                    st.warning("⚠️ Atenção: Esta empresa tem Fluxo de Caixa Livre negativo ou zerado. O DCF não é confiável.")
                 
-                st.markdown("### 🎯 Resultado do Valuation")
+                # Heatmap
+                st.markdown("#### Sensibilidade")
+                w_rng = [dw-0.02, dw-0.01, dw, dw+0.01, dw+0.02]
+                g_rng = [dg-0.02, dg-0.01, dg, dg+0.01, dg+0.02]
+                z_val = [[calcular_dcf_individual(row, g, w, dt)[0] for g in g_rng] for w in w_rng]
                 
-                k1, k2, k3 = st.columns(3)
-                k1.metric("Preço Atual", f"R$ {row['Preço']:.2f}")
-                k2.metric("Preço Justo (DCF)", f"R$ {fair_price:.2f}")
-                k3.metric("Upside / Downside", f"{margin:.1f}%", delta_color="normal" if margin > 0 else "off")
-                
-                if fair_price <= 0:
-                    st.error("⚠️ O cálculo retornou valor negativo ou zero. Verifique se o Fluxo de Caixa Livre (FCF) é positivo.")
-                else:
-                    if margin > 20: st.success("✅ Oportunidade: Margem de Segurança Alta")
-                    elif margin > 0: st.info("⚖️ Preço Justo (Leve Desconto)")
-                    else: st.warning("⛔ Ativo Caro segundo estas premissas")
-
-                st.divider()
-                
-                # --- MATRIZ DE SENSIBILIDADE (HEATMAP) ---
-                st.markdown("#### 🔥 Matriz de Sensibilidade (Preço Justo)")
-                
-                # Gera faixas de WACC e Growth
-                wacc_range = [dcf_wacc - 0.02, dcf_wacc - 0.01, dcf_wacc, dcf_wacc + 0.01, dcf_wacc + 0.02]
-                growth_range = [dcf_growth - 0.02, dcf_growth - 0.01, dcf_growth, dcf_growth + 0.01, dcf_growth + 0.02]
-                
-                z_values = []
-                for w in wacc_range:
-                    row_z = []
-                    for g in growth_range:
-                        fp, _ = calcular_dcf_individual(row, g, w, dcf_terminal)
-                        row_z.append(round(fp, 2))
-                    z_values.append(row_z)
-                
-                # Plot Heatmap
-                fig_heat = px.imshow(
-                    z_values,
-                    labels=dict(x="Crescimento (Growth)", y="WACC", color="Preço Justo"),
-                    x=[f"{g*100:.1f}%" for g in growth_range],
-                    y=[f"{w*100:.1f}%" for w in wacc_range],
-                    text_auto=True,
-                    color_continuous_scale='RdYlGn'
-                )
-                fig_heat.update_layout(height=400)
-                st.plotly_chart(fig_heat, use_container_width=True)
-                st.caption("Eixo X: Taxa de Crescimento | Eixo Y: Taxa de Desconto (WACC)")
+                fig = px.imshow(z_val, x=[f"{g*100:.1f}%" for g in g_rng], y=[f"{w*100:.1f}%" for w in w_rng], text_auto=".2f", color_continuous_scale='RdYlGn', labels=dict(x="Growth", y="WACC", color="Valor"))
+                st.plotly_chart(fig, use_container_width=True)
 
     else:
-        st.info("👈 Clique em 'Carregar Dados' para iniciar.")
+        st.info("👈 Clique em 'Carregar Dados' para começar.")
 
 if __name__ == "__main__":
     main()
