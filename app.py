@@ -1,10 +1,12 @@
 """
-B3 Pro Analyzer - Titanium Edition (DCF Fix)
-============================================
-Correções:
-1. Resiliência: Se faltar FCF (Fluxo de Caixa), estima via EBITDA para não travar.
-2. Fallback: Se o DCF falhar, a ação ainda aparece na lista com os outros dados.
-3. Robustez: Tratamento de erros campo a campo para evitar descarte total do ativo.
+B3 Pro Analyzer - Plutonium Edition (Hybrid Valuation)
+======================================================
+Novidades:
+1. MOTOR HÍBRIDO:
+   - Bancos/Seguros -> Avaliados pelo Modelo de Gordon (Dividendos).
+   - Empresas Gerais -> Avaliadas por DCF (Fluxo de Caixa).
+2. FIX PRIO3/GROWTH: Se FCF < 0, usa Lucro Líquido como proxy para não invalidar o valuation.
+3. FORMATÇÃO: Tabelas ajustadas (percentuais e moedas).
 
 Token: rxNx6YXRYuEkQFDAc66r3C
 """
@@ -18,10 +20,9 @@ import plotly.graph_objects as go
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 
-# Ignorar avisos
 warnings.filterwarnings('ignore')
 
-# --- Configuração da Página ---
+# --- Configuração ---
 st.set_page_config(
     page_title="B3 Pro Valuation",
     page_icon="💎",
@@ -29,11 +30,10 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CSS Customizado ---
+# --- CSS ---
 st.markdown("""
 <style>
     .main-header { font-size: 2rem; font-weight: bold; color: #0066cc; text-align: center; margin-bottom: 1rem; }
-    
     div[data-testid="stMetric"] {
         background-color: #f8f9fa !important;
         border: 1px solid #dee2e6;
@@ -41,17 +41,8 @@ st.markdown("""
         border-radius: 8px;
         border-left: 5px solid #0066cc;
     }
-    
-    div[data-testid="stMetric"] label {
-        color: #495057 !important;
-        font-size: 14px !important;
-    }
-    
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-        color: #212529 !important;
-        font-weight: 700 !important;
-    }
-    
+    div[data-testid="stMetric"] label { color: #495057 !important; font-size: 14px !important; }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] { color: #212529 !important; font-weight: 700 !important; }
     img { border-radius: 5px; }
 </style>
 """, unsafe_allow_html=True)
@@ -62,14 +53,14 @@ class BrapiClient:
         self.base_url = "https://brapi.dev/api"
         
         self.tickers_padrao = [
-            'BBAS3', 'ITUB4', 'BBDC4', 'SANB11', 'ABCB4', 'BRSR6', 
+            'BBAS3', 'ITUB4', 'BBDC4', 'SANB11', 'ABCB4', 'BRSR6', # Financeiro (Gordon)
+            'BBSE3', 'CXSE3', 'PSSA3', # Seguros (Gordon)
             'TAEE11', 'TRPL4', 'CPLE6', 'EGIE3', 'ALUP11', 'CMIG4', 
             'VALE3', 'CSNA3', 'GGBR4', 'USIM5', 'GOAU4',
-            'WEGE3', 'PSSA3', 'BBSE3', 'CXSE3',
-            'SAPR11', 'CSMG3', 'SBSP3',
-            'PRIO3', 'PETR4', 'RECV3',
+            'WEGE3', 'PRIO3', 'PETR4', 'RECV3',
             'JBSS3', 'MRFG3', 'BEEF3',
-            'MGLU3', 'LREN3', 'RDOR3', 'RAIL3', 'TOTS3'
+            'MGLU3', 'LREN3', 'RDOR3', 'RAIL3', 'TOTS3',
+            'SAPR11', 'CSMG3', 'SBSP3'
         ]
 
     def _tratar_ticker(self, ticker):
@@ -101,18 +92,16 @@ class BrapiClient:
         ticker = self._tratar_ticker(ticker_raw)
         headers = {'Authorization': f'Bearer {self.token}'}
         
-        # Solicita módulos financeiros para tentar achar o FCF
         params = {
             'fundamental': 'true', 
             'dividends': 'true',
-            'modules': 'defaultKeyStatistics,summaryDetail,financialData,summaryProfile,price', 
+            'modules': 'defaultKeyStatistics,summaryDetail,financialData,summaryProfile,price,incomeStatementHistory', 
             'range': '1y',
             'interval': '1d',
         }
         
         try:
             url = f"{self.base_url}/quote/{ticker}"
-            # Timeout aumentado para 15s para garantir download de balanços
             response = requests.get(url, headers=headers, params=params, timeout=15)
             data = response.json()
             
@@ -120,21 +109,19 @@ class BrapiClient:
             stock = data['results'][0]
             
             def buscar_dado(keys_list):
-                # 1. Busca na raiz
                 for k in keys_list:
                     if stock.get(k): return stock.get(k)
-                # 2. Busca nos módulos
-                modulos = ['defaultKeyStatistics', 'summaryDetail', 'financialData', 'summaryProfile', 'price']
+                modulos = ['defaultKeyStatistics', 'summaryDetail', 'financialData', 'summaryProfile', 'price', 'incomeStatementHistory']
                 for mod in modulos:
                     if mod in stock and isinstance(stock[mod], dict):
                         for k in keys_list:
                             val = stock[mod].get(k)
-                            if val is not None: return val # Aceita 0, mas não None
+                            if val is not None: return val
                 return 0
 
-            # --- Extração de Dados Essenciais ---
+            # --- DADOS GERAIS ---
             price = self._safe_float(stock.get('regularMarketPrice'))
-            if price == 0: return None # Sem preço não tem jogo
+            if price == 0: return None
             
             logo = stock.get('logourl', 'https://brapi.dev/favicon.ico')
             setor = stock.get('summaryProfile', {}).get('sector', 'Outros')
@@ -147,79 +134,66 @@ class BrapiClient:
             }
             setor = setor_map.get(setor, setor)
 
-            # --- DADOS DCF (Modo Resiliente) ---
-            fcf = self._safe_float(buscar_dado(['freeCashflow', 'freeCashFlow']))
-            ebitda = self._safe_float(buscar_dado(['ebitda', 'EBITDA']))
-            
-            # Fallback: Se não tem FCF, estima via EBITDA
-            # FCF ≈ EBITDA * 0.7 (Assumindo 30% de Impostos + Capex em média)
-            if fcf == 0 and ebitda != 0:
-                fcf = ebitda * 0.7 
-            
-            # Se ainda for 0, tenta Operating Cash Flow
-            if fcf == 0:
-                ocf = self._safe_float(buscar_dado(['operatingCashflow', 'totalCashFromOperatingActivities']))
-                if ocf != 0: fcf = ocf * 0.8 # OCF - Capex estimado
-            
+            # --- DADOS PARA VALUATION ---
             shares = self._safe_float(buscar_dado(['sharesOutstanding', 'impliedSharesOutstanding']))
+            
+            # 1. Fluxo de Caixa (FCF)
+            fcf = self._safe_float(buscar_dado(['freeCashflow', 'freeCashFlow']))
+            # 2. Lucro Líquido (Net Income) - Fallback para Growth/Bancos
+            net_income = self._safe_float(buscar_dado(['netIncome', 'netIncomeToCommon']))
+            
+            # Se FCF for negativo ou zero, usa Lucro Líquido como Proxy (com desconto de 20% por prudência)
+            # Isso salva o valuation da PRIO3 e outras de growth
+            fcf_usado = fcf
+            metodo_fcf = "FCF Real"
+            if fcf <= 0 and net_income > 0:
+                fcf_usado = net_income * 0.8 # Proxy Conservadora
+                metodo_fcf = "Lucro Líq (Proxy)"
+            
+            # Dívida
             total_debt = self._safe_float(buscar_dado(['totalDebt']))
-            total_cash = self._safe_float(buscar_dado(['totalCash', 'cash', 'totalCashFromOperatingActivities']))
+            total_cash = self._safe_float(buscar_dado(['totalCash', 'cash']))
             net_debt = total_debt - total_cash
 
-            # --- Valuation Clássico ---
+            # --- MÚLTIPLOS ---
             pl = self._safe_float(buscar_dado(['priceToEarnings', 'trailingPE']))
             lpa = self._safe_float(buscar_dado(['earningsPerShare', 'trailingEps']))
             vpa = self._safe_float(buscar_dado(['bookValuePerShare', 'bookValue']))
             pvp = self._safe_float(buscar_dado(['priceToBook', 'priceToBookRatio']))
-            
             divida_ebitda = self._safe_float(buscar_dado(['debtToEbitda']))
-            if divida_ebitda == 0 and ebitda > 0: divida_ebitda = total_debt / ebitda
             
-            margem_liq = self._safe_float(buscar_dado(['profitMargins', 'profitMargin']))
-            
-            # Math Fixes
+            # Math Fix
             if vpa == 0 and pvp > 0: vpa = price / pvp
-            if pvp == 0 and vpa > 0: pvp = price / vpa
             if lpa == 0 and pl > 0: lpa = price / pl
-            if pl == 0 and lpa > 0: pl = price / lpa
             
-            # Dividendos
+            # Dividendos (Para Modelo de Gordon)
             dy_raw = self._safe_float(buscar_dado(['dividendYield']))
             dy_decimal = dy_raw / 100 if dy_raw > 1 else dy_raw
-            
+            div_rate = self._safe_float(buscar_dado(['dividendRate']))
+            if div_rate == 0: div_rate = price * dy_decimal # Calcula R$ se faltar
+
             roe = self._safe_float(buscar_dado(['returnOnEquity']))
             volume = self._safe_float(stock.get('regularMarketVolume'))
 
             # Graham
             valor_graham = 0
-            ms_graham = -100
             if lpa > 0 and vpa > 0:
                 valor_graham = np.sqrt(22.5 * lpa * vpa)
-                ms_graham = ((valor_graham - price) / price) * 100
-            
-            # RSI
-            rsi = 50
-            hist = stock.get('historicalDataPrice', [])
-            if hist:
-                closes = [d.get('close') for d in hist if d.get('close')]
-                rsi = self.calcular_rsi(closes)
             
             # Armadilhas
             motivo_trap = []
-            is_trap = False
             if roe != 0 and roe < 0.05: motivo_trap.append("ROE Baixo")
             if divida_ebitda > 5: motivo_trap.append("Dívida Alta")
             if volume < 50000: motivo_trap.append("Iliquidez")
-            if motivo_trap: is_trap = True
 
             return {
                 'Logo': logo, 'Ticker': ticker, 'Setor': setor, 'Preço': price,
-                'V. Graham': valor_graham, 'MS Graham (%)': ms_graham,
-                'DY (%)': dy_decimal * 100, 'P/L': pl, 'P/VP': pvp,
-                'ROE (%)': roe * 100, 'Margem Liq (%)': margem_liq * 100,
-                'Dívida/EBITDA': divida_ebitda, 'IFR (14)': rsi,
-                'FCF': fcf, 'Shares': shares, 'Net Debt': net_debt,
-                'Armadilha': "⚠️ SIM" if is_trap else "🛡️ NÃO",
+                'V. Graham': valor_graham,
+                'DY (%)': dy_decimal * 100, 'P/L': pl, 'ROE (%)': roe * 100,
+                'Dívida/EBITDA': divida_ebitda,
+                'FCF': fcf_usado, 'Metodo FCF': metodo_fcf, 'Shares': shares, 'Net Debt': net_debt,
+                'Net Income': net_income, 'Div Rate (R$)': div_rate,
+                'Armadilha': "⚠️ SIM" if motivo_trap else "🛡️ NÃO",
                 'Score Magic': 0
             }
         except: return None
@@ -241,50 +215,56 @@ class BrapiClient:
         df.loc[mask, 'Rank_ROE'] = df.loc[mask, 'ROE (%)'].replace(0, -999).rank(ascending=False)
         df['Magic_Points'] = df['Rank_PL'] + df['Rank_ROE']
         min_p, max_p = df['Magic_Points'].min(), df['Magic_Points'].max()
-        if max_p != min_p:
-            df['Score Magic'] = 100 * (1 - (df['Magic_Points'] - min_p) / (max_p - min_p))
-        else: df['Score Magic'] = 50
+        df['Score Magic'] = 100 * (1 - (df['Magic_Points'] - min_p) / (max_p - min_p)) if max_p != min_p else 50
         return df.sort_values('Score Magic', ascending=False).fillna(0)
 
-# --- ENGINE DCF ---
-def calcular_dcf_individual(row, growth_rate=0.06, wacc=0.12, terminal_growth=0.03, projection_years=5):
+# --- MOTOR DE VALUATION HÍBRIDO (PLUTONIUM ENGINE) ---
+def calcular_valuation_hibrido(row, wacc=0.12, growth=0.06):
+    """
+    Decide qual modelo usar: Gordon (Bancos) ou DCF (Geral).
+    """
     try:
-        fcf = row['FCF']
-        shares = row['Shares']
-        net_debt = row['Net Debt']
+        fair_price = 0
+        metodo = "N/A"
         
-        # Se não temos dados vitais, não calcula (retorna 0), mas não quebra o app
-        if fcf <= 0 or shares <= 0: return 0, -100
-        
-        # 1. Projeção
-        future_fcf = []
-        for i in range(1, projection_years + 1):
-            fcf_proj = fcf * ((1 + growth_rate) ** i)
-            future_fcf.append(fcf_proj)
+        # 1. BANCOS E SEGUROS -> MODELO DE GORDON
+        if row['Setor'] in ['Financeiro', 'Seguros'] or row['Ticker'] in ['BBAS3', 'ITUB4', 'BBDC4', 'SANB11', 'BBSE3', 'CXSE3', 'PSSA3']:
+            metodo = "Gordon (Div)"
+            div_rate = row['Div Rate (R$)']
+            ke = wacc + 0.02 # Custo de Capital p/ Bancos costuma ser maior ou ajustado
+            g = min(growth, 0.04) # Crescimento perpétuo conservador para dividendos
             
-        # 2. Terminal
-        terminal_value = (future_fcf[-1] * (1 + terminal_growth)) / (wacc - terminal_growth)
+            if div_rate > 0 and ke > g:
+                fair_price = (div_rate * (1 + g)) / (ke - g)
         
-        # 3. Valor Presente (PV)
-        pv_flows = 0
-        for i, val in enumerate(future_fcf):
-            pv_flows += val / ((1 + wacc) ** (i + 1))
+        # 2. GERAL -> DCF (Fluxo de Caixa)
+        else:
+            metodo = f"DCF ({row.get('Metodo FCF', 'FCF')})"
+            fcf = row['FCF']
+            shares = row['Shares']
+            net_debt = row['Net Debt']
             
-        pv_terminal = terminal_value / ((1 + wacc) ** projection_years)
-        
-        # 4. Valor Final
-        enterprise_value = pv_flows + pv_terminal
-        equity_value = enterprise_value - net_debt
-        fair_price = equity_value / shares
-        
-        margin = ((fair_price - row['Preço']) / row['Preço']) * 100
-        
-        return fair_price, margin
+            if fcf > 0 and shares > 0:
+                # Projeção Simplificada 5 anos
+                future_flows = [fcf * ((1 + growth) ** i) for i in range(1, 6)]
+                terminal_value = (future_flows[-1] * 1.03) / (wacc - 0.03) # 3% perpétuo fixo
+                
+                pv_flows = sum([val / ((1 + wacc) ** (i + 1)) for i, val in enumerate(future_flows)])
+                pv_terminal = terminal_value / ((1 + wacc) ** 5)
+                
+                ev = pv_flows + pv_terminal
+                equity = ev - net_debt
+                fair_price = equity / shares
+
+        # Margem de Segurança
+        margin = ((fair_price - row['Preço']) / row['Preço']) * 100 if fair_price > 0 else -100
+        return fair_price, margin, metodo
+
     except:
-        return 0, -100
+        return 0, -100, "Erro"
 
 def main():
-    st.markdown('<div class="main-header">💎 B3 Pro: Titanium (Fix)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">💎 B3 Pro: Plutonium (Hybrid)</div>', unsafe_allow_html=True)
     
     client = BrapiClient()
     
@@ -297,34 +277,35 @@ def main():
     if entrada == "Carteira Sugerida":
         tickers = client.tickers_padrao
     else:
-        text = st.sidebar.text_area("Digite os tickers:", "WEGE3, VALE3, PRIO3")
+        text = st.sidebar.text_area("Digite os tickers:", "BBAS3, PRIO3, WEGE3")
         if text: tickers = text.split(',')
         else: tickers = []
 
-    st.sidebar.subheader("📊 Premissas DCF")
-    global_wacc = st.sidebar.slider("WACC Global (%)", 8.0, 20.0, 12.0, 0.5) / 100
-    global_growth = st.sidebar.slider("Crescimento Global (%)", 0.0, 20.0, 6.0, 0.5) / 100
+    st.sidebar.subheader("📊 Premissas Gerais")
+    global_wacc = st.sidebar.slider("Taxa de Desconto (WACC/Ke) %", 8.0, 20.0, 13.0, 0.5) / 100
+    global_growth = st.sidebar.slider("Crescimento (Growth) %", 0.0, 15.0, 7.0, 0.5) / 100
     
-    if st.sidebar.button("🚀 Carregar Dados + Calcular DCF"):
+    if st.sidebar.button("🚀 Processar Valuation Inteligente"):
         if not tickers: st.warning("Defina tickers.")
         else:
-            with st.spinner("Analisando Balanços e Fluxos de Caixa..."):
+            with st.spinner("Motor Híbrido: Calculando Gordon (Bancos) e DCF (Geral)..."):
                 df_new = client.buscar_dados_paralelo(tickers)
                 if not df_new.empty:
                     df_new = client.calcular_magic_score(df_new)
                     
-                    # Calcula DCF
-                    dcf_results = df_new.apply(
-                        lambda x: calcular_dcf_individual(x, growth_rate=global_growth, wacc=global_wacc), 
+                    # Aplica Valuation Híbrido
+                    val_results = df_new.apply(
+                        lambda x: calcular_valuation_hibrido(x, wacc=global_wacc, growth=global_growth), 
                         axis=1, result_type='expand'
                     )
-                    df_new['V. DCF (Padrão)'] = dcf_results[0]
-                    df_new['MS DCF (%)'] = dcf_results[1]
+                    df_new['Preço Justo (Híbrido)'] = val_results[0]
+                    df_new['Margem (%)'] = val_results[1]
+                    df_new['Modelo Usado'] = val_results[2]
                     
                     st.session_state['dados_b3'] = df_new
-                    st.success("Análise Completa!")
+                    st.success("Cálculos Realizados!")
                 else: 
-                    st.error("Não foi possível coletar dados suficientes. A API pode estar instável ou os tickers inválidos.")
+                    st.error("Erro na coleta de dados.")
 
     st.sidebar.divider()
     f_armadilha = st.sidebar.checkbox("Ocultar 'Armadilhas'", False)
@@ -334,75 +315,50 @@ def main():
         view = df.copy()
         if f_armadilha: view = view[view['Armadilha'].str.contains("NÃO")]
         
-        tab1, tab2, tab3 = st.tabs(["🏆 Ranking Valuation", "🏢 Comparação Setorial", "💎 Calculadora DCF"])
+        tab1, tab2 = st.tabs(["🏆 Ranking Valuation (Híbrido)", "🏢 Comparação Setorial"])
         
         with tab1:
-            st.subheader("Oportunidades")
+            st.subheader("Oportunidades (Gordon + DCF)")
+            st.markdown(
+                """
+                - 🏦 **Bancos/Seguros:** Avaliados por Dividendos (Gordon).
+                - 🏭 **Indústria/Varejo:** Avaliados por Fluxo de Caixa (DCF).
+                - 🚀 **Growth (ex: PRIO3):** Ajuste automático para usar Lucro se FCF < 0.
+                """
+            )
+            
             st.dataframe(
-                view[['Logo', 'Ticker', 'Preço', 'V. Graham', 'V. DCF (Padrão)', 'MS DCF (%)', 'P/L', 'ROE (%)', 'Score Magic']],
+                view[['Logo', 'Ticker', 'Setor', 'Preço', 'Preço Justo (Híbrido)', 'Margem (%)', 'Modelo Usado', 'P/L', 'Score Magic']],
                 column_config={
                     "Logo": st.column_config.ImageColumn("Logo", width="small"),
                     "Preço": st.column_config.NumberColumn(format="R$ %.2f"),
-                    "V. Graham": st.column_config.NumberColumn(format="R$ %.2f"),
-                    "V. DCF (Padrão)": st.column_config.NumberColumn(format="R$ %.2f"),
-                    "MS DCF (%)": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Preço Justo (Híbrido)": st.column_config.NumberColumn(format="R$ %.2f"),
+                    "Margem (%)": st.column_config.NumberColumn(format="%.1f%%"),
                     "Score Magic": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
                 },
                 hide_index=True, use_container_width=True
             )
-            st.info("Nota: Se V. DCF for 0, significa que a empresa tem FCF negativo ou dados insuficientes para projeção.")
         
         with tab2:
-            st.subheader("Setorial")
+            st.subheader("Análise Setorial 🍎")
             setores = sorted(view['Setor'].astype(str).unique())
             setor_sel = st.selectbox("Setor:", setores)
             df_sec = view[view['Setor'] == setor_sel].sort_values('Score Magic', ascending=False)
             
             if not df_sec.empty:
                 st.dataframe(
-                    df_sec[['Ticker', 'Preço', 'MS DCF (%)', 'P/L', 'ROE (%)', 'Dívida/EBITDA']],
-                    column_config={"MS DCF (%)": st.column_config.NumberColumn(format="%.1f%%")},
+                    df_sec[['Ticker', 'Preço', 'Margem (%)', 'P/L', 'ROE (%)', 'Dívida/EBITDA']],
+                    column_config={
+                        "Margem (%)": st.column_config.NumberColumn(format="%.1f%%"),
+                        "P/L": st.column_config.NumberColumn(format="%.1f"),
+                        "ROE (%)": st.column_config.NumberColumn(format="%.1f%%"),
+                        "Dívida/EBITDA": st.column_config.NumberColumn(format="%.2f"),
+                        "Preço": st.column_config.NumberColumn(format="R$ %.2f"),
+                    },
                     hide_index=True, use_container_width=True
                 )
-        
-        with tab3:
-            st.subheader("🔬 Calculadora DCF")
-            ticker_dcf = st.selectbox("Ativo:", view['Ticker'].unique())
-            row = view[view['Ticker'] == ticker_dcf].iloc[0]
-            
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                st.markdown("#### Premissas")
-                dg = st.slider("Crescimento %", 0.0, 25.0, global_growth*100, 0.5) / 100
-                dw = st.slider("WACC %", 8.0, 25.0, global_wacc*100, 0.5) / 100
-                dt = st.slider("Perpetuidade %", 0.0, 6.0, 3.0, 0.1) / 100
-                
-                st.markdown("#### Dados Base")
-                st.metric("FCF (Milhões)", f"R$ {row['FCF']/1e6:.0f}M")
-                st.metric("Dívida Líq. (Milhões)", f"R$ {row['Net Debt']/1e6:.0f}M")
-            
-            with c2:
-                fp, marg = calcular_dcf_individual(row, dg, dw, dt)
-                st.markdown("### Resultado")
-                col_m1, col_m2, col_m3 = st.columns(3)
-                col_m1.metric("Preço Justo", f"R$ {fp:.2f}")
-                col_m2.metric("Preço Tela", f"R$ {row['Preço']:.2f}")
-                col_m3.metric("Margem", f"{marg:.1f}%", delta_color="normal" if marg > 0 else "off")
-                
-                if row['FCF'] <= 0:
-                    st.warning("⚠️ Atenção: Esta empresa tem Fluxo de Caixa Livre negativo ou zerado. O DCF não é confiável.")
-                
-                # Heatmap
-                st.markdown("#### Sensibilidade")
-                w_rng = [dw-0.02, dw-0.01, dw, dw+0.01, dw+0.02]
-                g_rng = [dg-0.02, dg-0.01, dg, dg+0.01, dg+0.02]
-                z_val = [[calcular_dcf_individual(row, g, w, dt)[0] for g in g_rng] for w in w_rng]
-                
-                fig = px.imshow(z_val, x=[f"{g*100:.1f}%" for g in g_rng], y=[f"{w*100:.1f}%" for w in w_rng], text_auto=".2f", color_continuous_scale='RdYlGn', labels=dict(x="Growth", y="WACC", color="Valor"))
-                st.plotly_chart(fig, use_container_width=True)
-
     else:
-        st.info("👈 Clique em 'Carregar Dados' para começar.")
+        st.info("👈 Clique em 'Processar Valuation Inteligente'.")
 
 if __name__ == "__main__":
     main()
