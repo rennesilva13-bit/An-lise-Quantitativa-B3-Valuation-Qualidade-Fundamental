@@ -1,6 +1,5 @@
 streamlit>=1.30.0
 pandas>=2.1.3
 numpy>=1.24.3
-yfinance>=0.2.40
 plotly>=5.17.0
-matplotlib>=3.8.0
+requests>=2.31.0
