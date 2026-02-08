@@ -1,11 +1,10 @@
 """
-B3 Pro Analyzer - Brapi Edition (Math Fix)
-==========================================
-Correção Final:
-- Engenharia reversa de dados:
-  - Se faltar VPA, calcula via Preço / (P/VP).
-  - Se faltar P/L, calcula via Preço / LPA.
-- Isso garante que a Fórmula de Graham (Raiz de 22.5 * LPA * VPA) funcione sempre.
+B3 Pro Analyzer - Brapi Edition (Advanced Modules)
+==================================================
+Correção Definitiva:
+- Solicita módulos 'defaultKeyStatistics' e 'summaryDetail' explicitamente.
+- Busca VPA e P/VP em camadas profundas do JSON para garantir o Valuation.
+- Mantém o cálculo reverso (Math Fix) como última rede de segurança.
 
 Token: rxNx6YXRYuEkQFDAc66r3C
 """
@@ -58,7 +57,6 @@ class BrapiClient:
         return ticker.replace("'", "").replace('"', "").strip().upper().replace(".SA", "")
 
     def _safe_float(self, value):
-        """Converte para float de forma segura, retornando 0 se falhar."""
         try:
             if value is None: return 0.0
             return float(value)
@@ -83,9 +81,12 @@ class BrapiClient:
         ticker = self._tratar_ticker(ticker_raw)
         
         headers = {'Authorization': f'Bearer {self.token}'}
+        
+        # SOLICITAÇÃO DE MÓDULOS ESPECÍFICOS (CORREÇÃO AQUI)
         params = {
             'fundamental': 'true', 
             'dividends': 'true',
+            'modules': 'defaultKeyStatistics,summaryDetail,financialData', # Pede tudo
             'range': '1mo',
             'interval': '1d',
         }
@@ -100,48 +101,52 @@ class BrapiClient:
             
             stock = data['results'][0]
             
+            # --- Função "Farejadora" de Dados ---
+            # Procura o dado na raiz e dentro dos módulos
+            def buscar_dado(keys_list):
+                # 1. Tenta na raiz
+                for k in keys_list:
+                    if stock.get(k): return stock.get(k)
+                
+                # 2. Tenta nos módulos
+                modulos = ['defaultKeyStatistics', 'summaryDetail', 'financialData']
+                for mod in modulos:
+                    if mod in stock and isinstance(stock[mod], dict):
+                        for k in keys_list:
+                            val = stock[mod].get(k)
+                            if val: return val
+                return 0
+
             # --- Extração de Dados ---
             price = self._safe_float(stock.get('regularMarketPrice'))
             if price == 0: return None
             
             logo = stock.get('logourl', 'https://brapi.dev/favicon.ico')
             
-            # 1. Coleta Inicial dos Dados Disponíveis
-            pl = self._safe_float(stock.get('priceToEarnings'))
-            lpa = self._safe_float(stock.get('earningsPerShare'))
-            vpa = self._safe_float(stock.get('bookValuePerShare')) # VPA direto
-            if vpa == 0: vpa = self._safe_float(stock.get('bookValue'))
+            # Busca profunda pelos indicadores
+            pl = self._safe_float(buscar_dado(['priceToEarnings', 'trailingPE']))
+            lpa = self._safe_float(buscar_dado(['earningsPerShare', 'trailingEps']))
             
-            pvp = self._safe_float(stock.get('priceToBook')) # P/VP
+            # VPA: Procura por 'bookValuePerShare' ou 'bookValue' em qualquer lugar
+            vpa = self._safe_float(buscar_dado(['bookValuePerShare', 'bookValue']))
             
-            # 2. Engenharia Reversa (Math Fix) - O PULO DO GATO 🐱
+            # P/VP: Procura por 'priceToBook'
+            pvp = self._safe_float(buscar_dado(['priceToBook', 'priceToBookRatio']))
             
-            # Se não tem VPA, mas tem P/VP: VPA = Preço / PVP
-            if vpa == 0 and pvp > 0:
-                vpa = price / pvp
-            
-            # Se não tem P/VP, mas tem VPA: PVP = Preço / VPA
-            if pvp == 0 and vpa > 0:
-                pvp = price / vpa
-
-            # Se não tem LPA, mas tem P/L: LPA = Preço / PL
-            if lpa == 0 and pl > 0:
-                lpa = price / pl
-
-            # Se não tem P/L, mas tem LPA: PL = Preço / LPA
-            if pl == 0 and lpa > 0:
-                pl = price / lpa
+            # --- Engenharia Reversa (Rede de Segurança) ---
+            if vpa == 0 and pvp > 0: vpa = price / pvp
+            if pvp == 0 and vpa > 0: pvp = price / vpa
+            if lpa == 0 and pl > 0: lpa = price / pl
+            if pl == 0 and lpa > 0: pl = price / lpa
                 
-            # 3. Dividendos
-            dy_raw = self._safe_float(stock.get('dividendYield'))
+            # Dividendos
+            dy_raw = self._safe_float(buscar_dado(['dividendYield']))
             dy_decimal = dy_raw / 100 if dy_raw > 1 else dy_raw
             
-            roe = self._safe_float(stock.get('returnOnEquity'))
+            roe = self._safe_float(buscar_dado(['returnOnEquity']))
             volume = self._safe_float(stock.get('regularMarketVolume'))
             
-            # --- Cálculos Finais ---
-            
-            # Graham: Raiz(22.5 * LPA * VPA)
+            # --- Cálculos ---
             valor_graham = 0
             ms_graham = -100
             
@@ -149,11 +154,9 @@ class BrapiClient:
                 valor_graham = np.sqrt(22.5 * lpa * vpa)
                 ms_graham = ((valor_graham - price) / price) * 100
             
-            # Bazin
             dy_reais = price * dy_decimal
             valor_bazin = dy_reais / 0.06 if dy_reais > 0 else 0
             
-            # RSI
             rsi = 50
             hist = stock.get('historicalDataPrice', [])
             if hist:
@@ -175,7 +178,7 @@ class BrapiClient:
                 'MS Graham (%)': ms_graham,
                 'DY (%)': dy_decimal * 100,
                 'P/L': pl,
-                'P/VP': pvp, # Adicionado para visualização
+                'P/VP': pvp,
                 'VPA': vpa,
                 'LPA': lpa,
                 'ROE (%)': roe * 100,
@@ -186,43 +189,33 @@ class BrapiClient:
             }
 
         except Exception as e:
-            # print(f"Erro no ativo {ticker}: {e}")
             return None
 
     def buscar_dados_paralelo(self, tickers_list):
-        dados_validos = []
         tickers_clean = [self._tratar_ticker(t) for t in tickers_list if t.strip()]
-        
         with ThreadPoolExecutor(max_workers=10) as executor:
             results = list(executor.map(self.buscar_ativo_individual, tickers_clean))
-            
-        dados_validos = [r for r in results if r is not None]
-        return pd.DataFrame(dados_validos)
+        return pd.DataFrame([r for r in results if r is not None])
 
     def calcular_magic_score(self, df):
         if df.empty: return df
         df = df.copy()
-        
         mask = df['P/L'] > 0
         if not mask.any(): 
             df['Score Magic'] = 0
             return df
-
         df.loc[mask, 'Rank_PL'] = df.loc[mask, 'P/L'].rank(ascending=True)
         df.loc[mask, 'Rank_ROE'] = df.loc[mask, 'ROE (%)'].replace(0, -999).rank(ascending=False)
-        
         df['Magic_Points'] = df['Rank_PL'] + df['Rank_ROE']
         min_p, max_p = df['Magic_Points'].min(), df['Magic_Points'].max()
-        
         if max_p != min_p:
             df['Score Magic'] = 100 * (1 - (df['Magic_Points'] - min_p) / (max_p - min_p))
         else:
             df['Score Magic'] = 50
-            
         return df.sort_values('Score Magic', ascending=False).fillna(0)
 
 def main():
-    st.markdown('<div class="main-header">💎 B3 Pro: Brapi Full (Math Fix)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">💎 B3 Pro: Brapi Full (Advanced)</div>', unsafe_allow_html=True)
     
     client = BrapiClient()
     
@@ -232,11 +225,9 @@ def main():
     if entrada == "Carteira Sugerida":
         tickers = client.tickers_padrao
     else:
-        text = st.sidebar.text_area("Digite os tickers:", "PETR4, VALE3, CMIG4, BBAS3")
-        if text:
-            tickers = text.split(',')
-        else:
-            tickers = []
+        text = st.sidebar.text_area("Digite os tickers:", "PETR4, VALE3, PRIO3, BBSE3")
+        if text: tickers = text.split(',')
+        else: tickers = []
 
     st.sidebar.divider()
     f_armadilha = st.sidebar.checkbox("Ocultar 'Armadilhas'", False)
@@ -247,7 +238,7 @@ def main():
             st.warning("Defina tickers.")
             return
             
-        with st.spinner(f"Processando {len(tickers)} ativos (Calculando VPA/LPA faltantes)..."):
+        with st.spinner(f"Processando {len(tickers)} ativos (Módulos Avançados)..."):
             df = client.buscar_dados_paralelo(tickers)
         
         if df.empty:
@@ -257,18 +248,16 @@ def main():
         df = client.calcular_magic_score(df)
         
         view = df.copy()
-        if f_armadilha:
-            view = view[view['Armadilha'].str.contains("NÃO")]
-        
+        if f_armadilha: view = view[view['Armadilha'].str.contains("NÃO")]
         view = view[view['MS Graham (%)'] >= min_ms]
 
         st.subheader(f"🎯 Resultados ({len(view)})")
         
         if view.empty:
-            st.warning("Aumente a abrangência dos filtros.")
+            st.warning("Sem resultados para os filtros atuais.")
         else:
             st.dataframe(
-                view[['Logo', 'Ticker', 'Preço', 'V. Graham', 'MS Graham (%)', 'P/L', 'P/VP', 'VPA', 'LPA', 'Score Magic']],
+                view[['Logo', 'Ticker', 'Preço', 'V. Graham', 'MS Graham (%)', 'P/L', 'P/VP', 'VPA', 'Score Magic']],
                 column_config={
                     "Logo": st.column_config.ImageColumn("Logo", width="small"),
                     "Preço": st.column_config.NumberColumn(format="R$ %.2f"),
@@ -276,7 +265,6 @@ def main():
                     "MS Graham (%)": st.column_config.NumberColumn(format="%.1f%%"),
                     "Score Magic": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
                     "VPA": st.column_config.NumberColumn(format="%.2f"),
-                    "LPA": st.column_config.NumberColumn(format="%.2f"),
                     "P/VP": st.column_config.NumberColumn(format="%.2f"),
                 },
                 hide_index=True,
@@ -289,15 +277,14 @@ def main():
                 fig = px.scatter(
                     view, x='MS Graham (%)', y='ROE (%)', 
                     size='Preço', color='Score Magic', 
-                    hover_name='Ticker',
-                    title="Matriz de Oportunidades",
+                    hover_name='Ticker', title="Matriz de Oportunidades",
                     color_continuous_scale='RdYlGn'
                 )
                 fig.add_vline(x=0, line_dash="dot")
                 st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                st.success("Nota: Se o VPA não vem da API, ele é calculado agora usando Preço / (P/VP).")
+                st.info("Agora buscando também nos módulos 'defaultKeyStatistics' e 'summaryDetail' para garantir o VPA.")
 
 if __name__ == "__main__":
     main()
