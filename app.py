@@ -1,10 +1,11 @@
 """
-B3 Pro Analyzer - Ruby Edition (Final UI Fix)
-=============================================
-Melhorias na Aba Setorial:
-1. FIX VISUAL: CSS forçado para garantir leitura dos cards (fundo branco/texto escuro).
-2. GRÁFICO RADAR: Compara a empresa selecionada vs. Média do Setor.
-3. SCATTER SETORIAL: Visualização de líderes do setor.
+B3 Pro Analyzer - Sapphire Edition (State Persistence Fix)
+==========================================================
+Correção de UX:
+- Implementação de Session State para manter os dados na tela
+  quando o usuário interage com filtros ou abas.
+- O botão agora serve para "Atualizar Dados".
+- Filtros aplicados em tempo real sem precisar recarregar a API.
 
 Token: rxNx6YXRYuEkQFDAc66r3C
 """
@@ -29,34 +30,29 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CSS Customizado (CORREÇÃO DE CORES) ---
+# --- CSS Customizado ---
 st.markdown("""
 <style>
-    /* Título Principal */
     .main-header { font-size: 2rem; font-weight: bold; color: #0066cc; text-align: center; margin-bottom: 1rem; }
     
-    /* CARDS DE MÉTRICAS - FORÇAR CORES */
     div[data-testid="stMetric"] {
-        background-color: #f8f9fa !important; /* Cinza bem claro */
+        background-color: #f8f9fa !important;
         border: 1px solid #dee2e6;
         padding: 15px;
         border-radius: 8px;
         border-left: 5px solid #0066cc;
     }
     
-    /* Força cor do título (Label) para cinza escuro */
     div[data-testid="stMetric"] label {
         color: #495057 !important;
         font-size: 14px !important;
     }
     
-    /* Força cor do valor para preto */
     div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
         color: #212529 !important;
         font-weight: 700 !important;
     }
     
-    /* Ajustes de Imagem */
     img { border-radius: 5px; }
 </style>
 """, unsafe_allow_html=True)
@@ -66,7 +62,6 @@ class BrapiClient:
         self.token = "rxNx6YXRYuEkQFDAc66r3C"
         self.base_url = "https://brapi.dev/api"
         
-        # Lista expandida
         self.tickers_padrao = [
             'BBAS3', 'ITUB4', 'BBDC4', 'SANB11', 'ABCB4', 'BRSR6', # Bancos
             'TAEE11', 'TRPL4', 'CPLE6', 'EGIE3', 'ALUP11', 'CMIG4', # Elétricas
@@ -134,13 +129,11 @@ class BrapiClient:
                             if val: return val
                 return 0
 
-            # Extração
             price = self._safe_float(stock.get('regularMarketPrice'))
             if price == 0: return None
             
             logo = stock.get('logourl', 'https://brapi.dev/favicon.ico')
             
-            # Setor
             setor = stock.get('summaryProfile', {}).get('sector', 'Outros')
             if not setor: setor = "Outros"
             
@@ -153,13 +146,11 @@ class BrapiClient:
             }
             setor = setor_map.get(setor, setor)
 
-            # Valuation e Solvência
             pl = self._safe_float(buscar_dado(['priceToEarnings', 'trailingPE']))
             lpa = self._safe_float(buscar_dado(['earningsPerShare', 'trailingEps']))
             vpa = self._safe_float(buscar_dado(['bookValuePerShare', 'bookValue']))
             pvp = self._safe_float(buscar_dado(['priceToBook', 'priceToBookRatio']))
             
-            # Dívida/EBITDA Manual
             divida_ebitda = self._safe_float(buscar_dado(['debtToEbitda']))
             if divida_ebitda == 0:
                 total_debt = self._safe_float(buscar_dado(['totalDebt']))
@@ -168,7 +159,6 @@ class BrapiClient:
             
             margem_liq = self._safe_float(buscar_dado(['profitMargins', 'profitMargin']))
             
-            # Math Fix
             if vpa == 0 and pvp > 0: vpa = price / pvp
             if pvp == 0 and vpa > 0: pvp = price / vpa
             if lpa == 0 and pl > 0: lpa = price / pl
@@ -180,15 +170,11 @@ class BrapiClient:
             roe = self._safe_float(buscar_dado(['returnOnEquity']))
             volume = self._safe_float(stock.get('regularMarketVolume'))
             
-            # Cálculos
             valor_graham = 0
             ms_graham = -100
             if lpa > 0 and vpa > 0:
                 valor_graham = np.sqrt(22.5 * lpa * vpa)
                 ms_graham = ((valor_graham - price) / price) * 100
-            
-            dy_reais = price * dy_decimal
-            valor_bazin = dy_reais / 0.06 if dy_reais > 0 else 0
             
             rsi = 50
             hist = stock.get('historicalDataPrice', [])
@@ -196,7 +182,6 @@ class BrapiClient:
                 closes = [d.get('close') for d in hist if d.get('close')]
                 rsi = self.calcular_rsi(closes)
             
-            # Armadilhas
             motivo_trap = []
             is_trap = False
             if roe != 0 and roe < 0.05: motivo_trap.append("ROE Baixo")
@@ -240,45 +225,59 @@ class BrapiClient:
         return df.sort_values('Score Magic', ascending=False).fillna(0)
 
 def main():
-    st.markdown('<div class="main-header">💎 B3 Pro: Ruby Edition</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">💎 B3 Pro: Sapphire Edition</div>', unsafe_allow_html=True)
     
     client = BrapiClient()
     
-    # Sidebar
+    # --- GERENCIAMENTO DE ESTADO (MEMÓRIA) ---
+    if 'dados_b3' not in st.session_state:
+        st.session_state['dados_b3'] = pd.DataFrame()
+
+    # --- SIDEBAR ---
     st.sidebar.header("⚙️ Controle")
     entrada = st.sidebar.radio("Ativos:", ["Carteira Sugerida", "Minha Lista"])
     
     if entrada == "Carteira Sugerida":
         tickers = client.tickers_padrao
-        st.sidebar.info(f"Monitorando {len(tickers)} ativos de diversos setores.")
+        st.sidebar.info(f"Monitorando {len(tickers)} ativos.")
     else:
         text = st.sidebar.text_area("Digite os tickers:", "PETR4, VALE3, WEGE3")
         if text: tickers = text.split(',')
         else: tickers = []
 
+    # Botão de Carregamento (Só precisa clicar uma vez)
+    if st.sidebar.button("🚀 Carregar / Atualizar Dados"):
+        if not tickers:
+            st.warning("Defina tickers.")
+        else:
+            with st.spinner("Baixando dados da B3..."):
+                df_new = client.buscar_dados_paralelo(tickers)
+                if not df_new.empty:
+                    df_new = client.calcular_magic_score(df_new)
+                    st.session_state['dados_b3'] = df_new
+                    st.success("Dados atualizados com sucesso!")
+                else:
+                    st.error("Falha ao buscar dados.")
+
     st.sidebar.divider()
+    
+    # --- FILTROS EM TEMPO REAL ---
+    # (Estes filtros funcionam instantaneamente se os dados já estiverem na memória)
     f_armadilha = st.sidebar.checkbox("Ocultar 'Armadilhas'", False)
     min_ms = st.sidebar.slider("Margem Graham Mínima %", -100, 100, -100)
     
-    if st.sidebar.button("🚀 Processar Análise"):
-        if not tickers:
-            st.warning("Defina tickers.")
-            return
-            
-        with st.spinner("Analisando mercado..."):
-            df = client.buscar_dados_paralelo(tickers)
+    # --- VISUALIZAÇÃO ---
+    # Verifica se existe dado na memória
+    if not st.session_state['dados_b3'].empty:
+        df = st.session_state['dados_b3']
         
-        if df.empty:
-            st.error("Sem dados.")
-            return
-
-        df = client.calcular_magic_score(df)
+        # Aplica filtros na memória local (rápido)
         view = df.copy()
         if f_armadilha: view = view[view['Armadilha'].str.contains("NÃO")]
         view = view[view['MS Graham (%)'] >= min_ms]
-
+        
         # TABS
-        tab1, tab2 = st.tabs(["🏆 Ranking Geral", "🏢 Análise Setorial Avançada"])
+        tab1, tab2 = st.tabs(["🏆 Ranking Geral", "🏢 Comparação Setorial"])
         
         # ABA 1
         with tab1:
@@ -296,23 +295,21 @@ def main():
                 },
                 hide_index=True, use_container_width=True
             )
-            
-            # Botão Download
             csv = view.drop(columns=['Logo']).to_csv(index=False).encode('utf-8')
             st.download_button("📥 Baixar CSV", csv, 'b3_analise.csv', 'text/csv')
 
-        # ABA 2 - MELHORADA
+        # ABA 2
         with tab2:
             st.subheader("Comparação Setorial 🍎")
-            
             if not view.empty:
                 setores = sorted(view['Setor'].astype(str).unique())
+                
+                # Seleção de Setor (Agora não apaga mais a tela!)
                 setor_sel = st.selectbox("Escolha o Setor:", setores)
                 
                 df_sec = view[view['Setor'] == setor_sel].sort_values('Score Magic', ascending=False)
                 
                 if not df_sec.empty:
-                    # 1. Métricas do Setor (CSS Corrigido)
                     media_pl = df_sec['P/L'].mean()
                     media_roe = df_sec['ROE (%)'].mean()
                     media_dy = df_sec['DY (%)'].mean()
@@ -323,55 +320,37 @@ def main():
                     c3.metric("Média DY Setor", f"{media_dy:.1f}%")
                     
                     st.divider()
-
-                    # 2. Layout Gráfico
                     col_radar, col_scatter = st.columns([1, 1])
                     
                     with col_radar:
-                        st.markdown("#### 🕸️ Raio-X: Empresa vs Setor")
-                        empresa_comp = st.selectbox("Comparar qual empresa com a média?", df_sec['Ticker'].unique())
-                        
+                        st.markdown("#### 🕸️ Raio-X")
+                        empresa_comp = st.selectbox("Comparar Empresa:", df_sec['Ticker'].unique())
                         if empresa_comp:
                             row = df_sec[df_sec['Ticker'] == empresa_comp].iloc[0]
-                            
-                            # Normalização simples para o Radar não ficar distorcido
-                            # Vamos usar valores absolutos comparativos
                             categories = ['ROE (%)', 'Margem Liq (%)', 'DY (%)']
-                            
                             val_empresa = [row['ROE (%)'], row['Margem Liq (%)'], row['DY (%)']]
                             val_media = [media_roe, df_sec['Margem Liq (%)'].mean(), media_dy]
                             
                             fig_radar = go.Figure()
-                            fig_radar.add_trace(go.Scatterpolar(
-                                r=val_empresa, theta=categories, fill='toself', name=empresa_comp, line_color='blue'
-                            ))
-                            fig_radar.add_trace(go.Scatterpolar(
-                                r=val_media, theta=categories, fill='toself', name='Média Setor', line_color='gray', opacity=0.5
-                            ))
-                            fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True)), showlegend=True, height=400)
+                            fig_radar.add_trace(go.Scatterpolar(r=val_empresa, theta=categories, fill='toself', name=empresa_comp))
+                            fig_radar.add_trace(go.Scatterpolar(r=val_media, theta=categories, fill='toself', name='Média Setor', opacity=0.5))
+                            fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True)), height=400)
                             st.plotly_chart(fig_radar, use_container_width=True)
 
                     with col_scatter:
-                        st.markdown("#### 🎯 Posicionamento no Setor")
+                        st.markdown("#### 🎯 Posicionamento")
                         fig_s = px.scatter(
                             df_sec, x='P/L', y='ROE (%)',
                             size='Preço', text='Ticker', color='Score Magic',
-                            title=f"Qualidade (ROE) vs Preço (P/L) - {setor_sel}",
-                            labels={'P/L': 'Preço/Lucro (Quanto menor, melhor)', 'ROE (%)': 'Rentabilidade (Quanto maior, melhor)'},
-                            color_continuous_scale='RdYlGn',
-                            height=400
+                            labels={'P/L': 'P/L (Barato →)', 'ROE (%)': 'ROE (Qualidade ↑)'},
+                            color_continuous_scale='RdYlGn', height=400
                         )
                         fig_s.update_traces(textposition='top center')
                         st.plotly_chart(fig_s, use_container_width=True)
-
-                    # 3. Tabela Simples
-                    st.markdown("#### 📋 Detalhes do Grupo")
-                    st.dataframe(
-                        df_sec[['Ticker', 'P/L', 'ROE (%)', 'Dívida/EBITDA', 'Score Magic']],
-                        hide_index=True, use_container_width=True
-                    )
                 else:
-                    st.info("Nenhuma empresa encontrada neste setor com os filtros atuais.")
+                    st.info("Nenhuma empresa encontrada neste setor.")
+    else:
+        st.info("👈 Clique em 'Carregar / Atualizar Dados' na barra lateral para começar.")
 
 if __name__ == "__main__":
     main()
