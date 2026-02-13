@@ -25,6 +25,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Tuple, Optional
 import time
+from functools import lru_cache
 
 # Ignorar avisos
 warnings.filterwarnings('ignore')
@@ -118,9 +119,11 @@ class BrapiClient:
         except (ValueError, TypeError):
             return 0.0
 
-    def calcular_rsi(self, precos_historicos: List[float], window: int = 14) -> float:
-        """Calcula o Índice de Força Relativa (RSI)"""
+    @lru_cache(maxsize=1000)
+    def calcular_rsi(self, precos_historicos_tuple: tuple, window: int = 14) -> float:
+        """Calcula o Índice de Força Relativa (RSI) com cache"""
         try:
+            precos_historicos = list(precos_historicos_tuple)
             if not precos_historicos or len(precos_historicos) < window:
                 return 50.0
             
@@ -274,8 +277,8 @@ class BrapiClient:
 
             # RSI
             hist = stock.get('historicalDataPrice', [])
-            precos = [h.get('close', 0) for h in hist if h.get('close')]
-            rsi = self.calcular_rsi(precos)
+            precos = tuple([h.get('close', 0) for h in hist if h.get('close')])
+            rsi = self.calcular_rsi(precos, 14)
 
             # 4. Detector de Armadilha de Valor
             armadilha_flags = []
@@ -416,9 +419,7 @@ def calcular_dcf_individual(
             fcf_projetado.append(fcf_ano)
         
         # 2. Valor Presente dos FCFs
-        pv_fcf = 0.0
-        for ano, fcf_ano in enumerate(fcf_projetado, start=1):
-            pv_fcf += fcf_ano / ((1 + wacc) ** ano)
+        pv_fcf = sum(fcf_ano / ((1 + wacc) ** ano) for ano, fcf_ano in enumerate(fcf_projetado, start=1))
         
         # 3. Valor Terminal (Perpetuidade)
         fcf_terminal = fcf_projetado[-1] * (1 + terminal_growth)
